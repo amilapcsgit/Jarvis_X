@@ -1,0 +1,11 @@
+bin/
+obj/
+publish*/
+runtime/
+node_modules/
+__pycache__/
+*.blend
+*.blend1
+*.log
+.env
+pilot*/

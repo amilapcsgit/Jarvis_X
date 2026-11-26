@@ -1,0 +1,327 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "ollama/qwen3.5-pilot:4b",
+  "compaction": {
+    "buffer": 1500,
+    "keep": {
+      "tokens": 1200
+    },
+    "background": false
+  },
+  "agents": {
+    "plan": {
+      "system": "Inspect the active project when needed and propose a concise plan. Leave project files unchanged.",
+      "permissions": [
+        {
+          "action": "*",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "read",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "glob",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "grep",
+          "resource": "*",
+          "effect": "allow"
+        }
+      ]
+    },
+    "build": {
+      "system": "Implement the agreed change in the active project. Inspect relevant files, make focused edits, and verify the result. Use real tool calls and report what actually ran.",
+      "permissions": [
+        {
+          "action": "*",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "read",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "glob",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "grep",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "*",
+          "effect": "ask"
+        }
+      ]
+    },
+    "desktop": {
+      "description": "Inspect and test the specified Windows app",
+      "mode": "primary",
+      "system": "Use the selected window only. Call Snapshot first for window-relative coordinates. Type sends literal text into the currently focused field. Click takes x and y from Snapshot. Stop and report any focus, target, layout, or approval rejection. Never try to bypass a paused action.",
+      "permissions": [
+        {
+          "action": "*",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "windows_mcp_Screenshot",
+          "resource": "*",
+          "effect": "ask"
+        },
+        {
+          "action": "windows_mcp_Snapshot",
+          "resource": "*",
+          "effect": "ask"
+        },
+        {
+          "action": "windows_mcp_Click",
+          "resource": "*",
+          "effect": "ask"
+        },
+        {
+          "action": "windows_mcp_Type",
+          "resource": "*",
+          "effect": "ask"
+        }
+      ]
+    },
+    "chat": {
+      "mode": "primary",
+      "system": "You are Jarvis, a local assistant. Answer concisely. Inspect attached images directly.",
+      "permissions": [
+        {
+          "action": "*",
+          "resource": "*",
+          "effect": "deny"
+        }
+      ]
+    },
+    "blender": {
+      "mode": "primary",
+      "system": "Work in visible local Blender. Inspect attached reference images first and infer silhouette, proportions, parts, materials, and unseen sides. Ask one or two specific questions only when their answers materially change geometry, dimensions, or output. End the turn to wait for the user's reply and continue the same model on the next turn. Otherwise state a practical assumption and start building. Use the structured build_house tool when its options fit the brief. For other models use short Blender Python scripts. Prefer explicit bpy.data.meshes.new, mesh.from_pydata, bpy.data.objects.new and collection.objects.link. bpy.ops returns status sets; obtain created objects from bpy.context.object when using operators. Use only known properties such as scene.unit_settings.system and scale_length. Never clear an existing scene. Work in a dedicated named collection, keep parts editable, and limit later edits to your own collection. Build silhouette first. After a successful build, call blender_look with viewport and solid, inspect its image against the reference, then make up to three meaningful refinements and capture again when comparison is useful. If a script errors, read the traceback, inspect current state if needed, and correct the specific error once. Stop after a repeated failure and report what worked and what is still needed. Save an editable .blend to a new filename in the selected project using bpy.ops.wm.save_as_mainfile(filepath=...). Verify the path exists after saving. Report the actual file and remaining assumptions. Preserve user work and avoid network services.",
+      "permissions": [
+        {
+          "action": "*",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "blender_get_scene_info",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "blender_get_addon_status",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "blender_look",
+          "resource": "*",
+          "effect": "ask"
+        },
+        {
+          "action": "blender_execute_blender_code",
+          "resource": "*",
+          "effect": "ask"
+        },
+        {
+          "effect": "ask",
+          "resource": "*",
+          "action": "blender_build_house"
+        }
+      ]
+    }
+  },
+  "providers": {
+    "inkling": {
+      "name": "Inkling on this PC",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "http://127.0.0.1:8080/v1"
+      },
+      "models": {
+        "inkling-2-mini": {
+          "name": "Inkling 2 Mini",
+          "limit": {
+            "context": 8192,
+            "output": 2048
+          },
+          "capabilities": {
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ],
+            "tools": true
+          },
+          "compatibility": {
+            "reasoningField": "reasoning_content"
+          },
+          "body": {
+            "reasoning_effort": "low"
+          }
+        }
+      }
+    },
+    "ollama": {
+      "settings": {
+        "baseURL": "http://127.0.0.1:11434/v1"
+      },
+      "models": {
+        "qwen3.5-pilot:4b": {
+          "name": "Qwen 3.5 4B (8K local pilot)",
+          "limit": {
+            "context": 8192,
+            "output": 2048
+          },
+          "capabilities": {
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ],
+            "tools": true
+          },
+          "body": {
+            "think": false
+          }
+        }
+      }
+    }
+  },
+  "mcp": {
+    "servers": {
+      "windows_mcp": {
+        "type": "local",
+        "command": [
+          "uvx",
+          "--offline",
+          "--python",
+          "3.14",
+          "--from",
+          "windows-mcp==0.9.0",
+          "python",
+          "JARVIS_DESKTOP_MCP_ENTRY"
+        ],
+        "environment": {
+          "ANONYMIZED_TELEMETRY": "false"
+        },
+        "codemode": false,
+        "protocol": "2026-07-28",
+        "timeout": {
+          "startup": 120000
+        }
+      },
+      "blender": {
+        "type": "local",
+        "command": [
+          "uvx",
+          "--offline",
+          "--python",
+          "3.14",
+          "--from",
+          "mcp-for-blender==2.3.1",
+          "python",
+          "JARVIS_BLENDER_MCP_ENTRY"
+        ],
+        "environment": {
+          "DISABLE_TELEMETRY": "true",
+          "BLENDER_HOST": "127.0.0.1",
+          "BLENDER_PORT": "19876"
+        },
+        "codemode": false,
+        "protocol": "legacy",
+        "timeout": {
+          "startup": 30000
+        }
+      }
+    }
+  },
+  "policies": [
+    {
+      "action": "provider.use",
+      "resource": "*",
+      "effect": "deny"
+    },
+    {
+      "action": "provider.use",
+      "resource": "inkling",
+      "effect": "allow"
+    },
+    {
+      "action": "provider.use",
+      "resource": "ollama",
+      "effect": "allow"
+    },
+    {
+      "action": "mcp.use",
+      "resource": "*",
+      "effect": "deny"
+    },
+    {
+      "action": "mcp.use",
+      "resource": "windows_mcp",
+      "effect": "allow"
+    },
+    {
+      "action": "mcp.use",
+      "resource": "blender",
+      "effect": "allow"
+    }
+  ],
+  "permissions": [
+    {
+      "action": "execute",
+      "resource": "*",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*",
+      "effect": "ask"
+    },
+    {
+      "action": "external_directory",
+      "resource": "*",
+      "effect": "deny"
+    },
+    {
+      "action": "windows_mcp_*",
+      "resource": "*",
+      "effect": "ask"
+    },
+    {
+      "action": "webfetch",
+      "resource": "*",
+      "effect": "deny"
+    },
+    {
+      "action": "websearch",
+      "resource": "*",
+      "effect": "deny"
+    }
+  ],
+  "default_agent": "chat",
+  "update": "disable"
+}

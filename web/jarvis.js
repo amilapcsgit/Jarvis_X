@@ -1,0 +1,417 @@
+'use strict';
+
+const node = id => document.getElementById(id);
+const bridge = window.chrome?.webview;
+const send = (command, value = '', id = '') => bridge?.postMessage({ command, value, id });
+const create = (tag, text, className) => {
+  const element = document.createElement(tag);
+  if (text != null) element.textContent = text;
+  if (className) element.className = className;
+  return element;
+};
+const cardRows = new Map();
+const activities = new Map();
+const processRows = new Map();
+let state = {};
+let windows = [];
+let history = [];
+let approval;
+let tab = 'activity';
+let minimized = false;
+let motionRequested = !matchMedia('(prefers-reduced-motion: reduce)').matches;
+let sceneLoaded = false;
+
+window.portfolioMotion = false;
+const prompt = node('prompt');
+const conversation = node('conversation');
+const layout = document.querySelector('.layout');
+const drawer = node('drawer');
+const canvas = node('ambient-canvas');
+const core = node('core-stage');
+
+const templates = {
+  chat: ['What are we working on?', 'Send a message or attach an image to get started.'],
+  plan: ['Plan a project change', 'Describe the change you want to make in this folder.'],
+  build: ['Build and test locally', 'Send a coding task and review any shell commands before they run.'],
+  blender: ['Build a scene in Blender', 'Attach a reference image, describe the result, and answer any questions in this conversation.', 'Create a simple house with one window and one door. Save it as an editable Blender file.'],
+  desktop: ['Work in a Windows app', 'Choose an open window above or launch an app here.'],
+};
+
+function setTab(name) {
+  tab = name;
+  for (const button of document.querySelectorAll('[data-tab]')) {
+    const active = button.dataset.tab === name;
+    button.setAttribute('aria-pressed', active);
+    node(button.dataset.tab).hidden = !active;
+  }
+  drawer.hidden = false;
+  layout.classList.remove('wide');
+  node('drawer-toggle').setAttribute('aria-expanded', 'true');
+  send('diagnostics', node('logs-control').open ? 'on' : 'off');
+  applyMotion();
+}
+
+function applyMotion() {
+  const show = !minimized;
+  window.portfolioMotion = show && motionRequested && !document.hidden;
+  canvas.classList.toggle('display-scene', show && motionRequested);
+  core.classList.toggle('static', !window.portfolioMotion);
+  if (window.portfolioMotion) {
+    clipCanvas();
+    if (!sceneLoaded) {
+      sceneLoaded = true;
+      import('./core-scene.js').catch(() => {
+        canvas.hidden = true;
+        node('motion').disabled = true;
+        node('motion').textContent = 'Animation unavailable';
+      });
+    }
+  }
+  window.dispatchEvent(new Event('portfolio-motion'));
+}
+
+function clipCanvas() {
+  const rect = core.getBoundingClientRect();
+  const inspector = core.closest('.work').getBoundingClientRect();
+  const top = Math.max(rect.top, inspector.top);
+  const bottom = Math.min(rect.bottom, inspector.bottom);
+  canvas.style.clipPath = bottom > top
+    ? `inset(${top}px ${innerWidth - rect.right}px ${innerHeight - bottom}px ${rect.left}px)`
+    : 'inset(100%)';
+}
+
+new ResizeObserver(clipCanvas).observe(core);
+node('drawer').querySelector('.inspector-scroll').addEventListener('scroll', clipCanvas, { passive: true });
+document.addEventListener('visibilitychange', applyMotion);
+
+function applyState(next) {
+  const lastMode = state.agent;
+  const lastSelected = state.target;
+  state = next;
+  node('blender-grant').hidden = !next.blenderGrant && !next.blenderPythonGrant;
+  node('blender-grant-label').textContent = next.blenderPythonGrant ? 'Blender Python allowed' : 'Blender session allowed';
+  const status = next.status || '';
+  node('core-state').textContent = status.startsWith('Waiting for approval') ? 'Waiting for approval'
+    : /failed|unavailable/i.test(status) ? 'Failed'
+    : status.startsWith('Running · blender_') ? 'Running Blender'
+    : status.startsWith('Completed ·') ? 'Completed'
+    : next.busy ? (/^Connecting/.test(status) ? 'Connecting' : 'Thinking')
+    : next.ready ? 'Ready' : 'Starting';
+  node('status').textContent = next.status;
+  node('status').title = next.status;
+  node('project').textContent = next.project;
+  node('project-name').textContent = next.project.split(/[\\/]/).filter(Boolean).at(-1) || next.project;
+  node('project-name').title = next.project;
+  node('mode').value = next.agent;
+  node('model').value = next.inkling ? 'inkling' : 'qwen';
+  node('desktop-controls').hidden = next.agent !== 'desktop';
+  node('focus').disabled = !next.target;
+  node('attachment').hidden = !next.attachment;
+  node('attachment').textContent = next.attachment ? next.attachment + ' ×' : '';
+  node('force-blender').hidden = !next.forceBlender;
+  node('show-blender').hidden = next.agent !== 'blender' || !next.forceBlender;
+  node('console').checked = next.console;
+  const disabled = !next.ready || next.busy;
+  for (const element of document.querySelectorAll('[data-select],[data-command="folder"],[data-command="new"],[data-command="diff"],[data-command="attach"],[data-command="detach"],[data-command="windows"],[data-command="launch"],[data-command="history"],#windows-toggle')) {
+    element.disabled = disabled;
+  }
+  for (const button of document.querySelectorAll('#history button'))
+    button.classList.toggle('active', button.dataset.value === next.session);
+  if (lastMode !== next.agent) {
+    const [title, copy, example] = templates[next.agent] || templates.chat;
+    node('welcome-title').textContent = title;
+    node('welcome-copy').textContent = copy;
+    node('suggestion').hidden = !example;
+    node('suggestion').textContent = example ? 'Use the one-window house example' : '';
+    node('suggestion').dataset.example = example || '';
+  }
+  if (lastSelected !== next.target) updateSelectedWindow();
+  updateApprovalButtons();
+  updateSend();
+}
+
+function updateSend() {
+  node('send').disabled = !state.ready || state.busy || !prompt.value.trim()
+    || (state.agent === 'desktop' && !state.target);
+}
+
+function updateSelectedWindow() {
+  const target = windows.find(item => item.id === state.target);
+  node('windows-toggle').textContent = target ? target.title + ' ▾' : 'Choose a window ▾';
+  node('windows-toggle').title = target ? `${target.title} · ${target.process}, PID ${target.pid}` : 'Select a window';
+}
+
+function renderWindows() {
+  const query = node('window-filter').value.toLocaleLowerCase().trim();
+  const items = windows.filter(item => [item.title, item.process, String(item.pid)].some(value => value.toLocaleLowerCase().includes(query)));
+  node('windows').replaceChildren(...items.map(item => {
+    const button = create('button');
+    button.dataset.target = item.id;
+    if (item.icon) {
+      const image = create('img');
+      image.src = item.icon;
+      image.alt = '';
+      button.append(image);
+    }
+    const label = create('div');
+    label.append(create('strong', item.title), create('small', `${item.process} · PID ${item.pid}`));
+    button.append(label);
+    return button;
+  }));
+  if (!items.length) node('windows').append(create('p', 'No matching open windows.', 'empty'));
+  updateSelectedWindow();
+}
+
+function renderHistory() {
+  node('history').replaceChildren(...history.map(item => {
+    const button = create('button', item.title || 'Untitled conversation');
+    button.dataset.command = 'history';
+    button.dataset.value = item.id;
+    button.title = button.textContent;
+    button.disabled = state.busy || !state.ready;
+    if (item.id === state.session) button.classList.add('active');
+    return button;
+  }));
+}
+
+function updateRow(row) {
+  const follow = conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 70;
+  if (!cardRows.has(row.id)) {
+    const card = create('article', null, row.author === 'You' ? 'message user' : 'message assistant');
+    const body = create('p');
+    card.append(create('h3', row.author), body);
+    cardRows.set(row.id, body);
+    node('messages').append(card);
+    node('welcome').hidden = true;
+  }
+  cardRows.get(row.id).textContent = row.body;
+  if (follow) conversation.scrollTop = conversation.scrollHeight;
+}
+
+function updateActivity(item) {
+  let view = activities.get(item.id);
+  if (!view) {
+    const card = create('details', null, 'event panel');
+    const summary = create('summary');
+    const name = create('strong');
+    const badge = create('span', '', 'badge');
+    const target = create('p');
+    const data = create('pre');
+    data.tabIndex = 0;
+    summary.append(name, badge);
+    card.append(summary, target, data);
+    node('timeline').prepend(card);
+    view = { name, badge, target, data };
+    activities.set(item.id, view);
+    node('activity-empty').hidden = true;
+  }
+  view.name.textContent = item.Tool;
+  view.badge.textContent = item.State;
+  view.badge.dataset.state = item.State;
+  view.target.textContent = item.Target;
+  view.data.textContent = [item.Arguments, item.Detail].filter(Boolean).join('\n\n');
+  view.data.hidden = !view.data.textContent;
+}
+
+function updateApprovalButtons() {
+  for (const button of document.querySelectorAll('[data-decision]'))
+    button.disabled = state.deciding || !approval || (!approval.fullInput && button.dataset.decision !== 'reject');
+}
+
+function showApproval(value) {
+  approval = value;
+  document.querySelector('[data-decision=blender-python-session]').hidden = !value?.blenderPython;
+  node('python-session-note').hidden = !value?.blenderPython;
+  document.querySelector('[data-decision=task]').textContent = value?.blenderPython ? 'Allow this exact script for task' : 'Approve for this task';
+  document.querySelector('[data-decision=blender-session]').hidden = !value?.blenderSession;
+  node('permission').hidden = !value;
+  updateApprovalButtons();
+  if (!value) return;
+  node('permission-action').textContent = value.action;
+  node('permission-target').textContent = value.target;
+  node('permission-args').textContent = value.arguments || 'No arguments';
+  setTab('activity');
+  node('drawer').querySelector('.inspector-scroll').scrollTop = 0;
+}
+
+const number = (value, unit = '', digits = 1) => value == null ? 'Unavailable' :
+  Number(value).toLocaleString(undefined, { maximumFractionDigits: digits }) + unit;
+const rate = value => number(value == null ? null : value / 1048576, ' MiB/s', 2);
+const pair = (used, total, unit) => used == null || total == null ? 'Unavailable' :
+  number(used) + ' / ' + number(total, unit);
+
+function stats(id, readings) {
+  const root = node(id);
+  const children = [...root.children];
+  readings.forEach(([label, value], index) => {
+    let card = children[index];
+    if (!card) {
+      card = create('div', null, 'stat');
+      card.append(create('small'), create('strong'));
+      root.append(card);
+    }
+    card.firstChild.textContent = label;
+    card.lastChild.textContent = value;
+  });
+}
+
+function updateMetrics(value) {
+  stats('stats', [
+    ['VRAM', pair(value.vramUsed, value.vramTotal, ' MiB')],
+    ['RAM', pair(value.ramUsed, value.ramTotal, ' GiB')],
+    ['SYSTEM CPU', number(value.cpu, '%')],
+    ['PHYSICAL DRIVE WRITES', rate(value.physicalWrites)]
+  ]);
+  const live = new Set(value.processes.map(process => process.pid));
+  for (const [pid, element] of processRows) {
+    if (live.has(pid)) continue;
+    element.remove();
+    processRows.delete(pid);
+  }
+  for (const process of value.processes) {
+    let row = processRows.get(process.pid);
+    if (!row) {
+      row = create('div', null, 'process');
+      row.append(create('strong'), create('small'), create('small'));
+      node('processes').append(row);
+      processRows.set(process.pid, row);
+    }
+    row.children[0].textContent = `${process.name} · PID ${process.pid}`;
+    row.children[1].textContent = `CPU ${number(process.cpu, '%')} · RAM ${number(process.ram, ' MiB')} · VRAM ${number(process.vram, ' MiB')}`;
+    row.children[2].textContent = `Writes ${rate(process.writeRate)} · ${number(process.writes, ' B total', 0)}`;
+  }
+}
+
+let readings = [];
+let readingIndex = 0;
+function showCoreReading() {
+  node('core-reading').textContent = readings[readingIndex] || 'Unavailable';
+}
+setInterval(() => {
+  if (minimized || document.hidden || !motionRequested) return;
+  readingIndex = (readingIndex + 1) % readings.length;
+  showCoreReading();
+}, 3000);
+function updateModel(value) {
+  readings = [value.model, number(value.output, ' output tokens', 0),
+    number(value.rate, ' tok/s'), 'First token · ' + number(value.ttft, ' ms', 0)];
+  showCoreReading();
+  stats('inference', [
+    ['MODEL', value.model], ['FIRST TOKEN', number(value.ttft, ' ms', 0)],
+    ['UNCACHED INPUT', number(value.input, '', 0)], ['OUTPUT TOKENS', number(value.output, '', 0)],
+    ['CACHED INPUT', number(value.cached, '', 0)], ['REASONING TOKENS', number(value.reasoning, '', 0)], ['GENERATION', number(value.rate, ' tok/s')]
+  ]);
+  node('rate').textContent = value.rate == null ? '' : number(value.rate, ' tok/s');
+}
+
+function reset() {
+  cardRows.clear();
+  activities.clear();
+  node('messages').replaceChildren();
+  node('timeline').replaceChildren();
+  node('activity-empty').hidden = false;
+  node('welcome').hidden = false;
+  node('capture').hidden = true;
+  node('capture').removeAttribute('src');
+  node('preview-empty').hidden = false;
+  node('diff').hidden = true;
+}
+
+bridge?.addEventListener('message', event => {
+  const { type, value } = event.data;
+  switch (type) {
+    case 'state': applyState(value); break;
+    case 'history': history = value; renderHistory(); break;
+    case 'windows': windows = value; renderWindows(); break;
+    case 'reset': reset(); break;
+    case 'row': updateRow(value); break;
+    case 'activity': updateActivity(value); break;
+    case 'permission': showApproval(value); break;
+    case 'sent': if (prompt.value === value) prompt.value = ''; updateSend(); break;
+    case 'image':
+      if (/^data:image\/(png|jpeg|webp);base64,/i.test(value)) {
+        node('capture').src = value;
+        node('capture').hidden = false;
+        node('preview-empty').hidden = true;
+      }
+      break;
+    case 'diff':
+      setTab('activity');
+      node('diff').hidden = false;
+      node('diff').open = true;
+      node('diff-value').textContent = value || 'No tracked changes.';
+      node('diff').scrollIntoView({ block: 'nearest' });
+      break;
+    case 'metrics': updateMetrics(value); break;
+    case 'metrics-error': node('processes').title = value; break;
+    case 'model': updateModel(value); break;
+    case 'logs': node('logs').textContent = value || 'No runtime output yet.'; break;
+    case 'connector': {
+      const label = node(value.name + '-state');
+      if (label) label.textContent = value.state;
+      break;
+    }
+    case 'visibility': minimized = value.minimized; applyMotion(); break;
+  }
+});
+
+document.addEventListener('click', event => {
+  const button = event.target.closest('button');
+  if (!button || button.disabled) return;
+  const { command, value, target, decision, tab: nextTab } = button.dataset;
+  if (command) send(command, value);
+  if (decision && approval) send('permission', decision, approval.id);
+  if (nextTab) setTab(nextTab);
+  if (target) {
+    send('target', target);
+    node('windows-popup').hidden = true;
+    node('windows-toggle').setAttribute('aria-expanded', 'false');
+    node('windows-toggle').focus();
+  }
+});
+document.addEventListener('change', event => {
+  const { select } = event.target.dataset;
+  if (select) send(select, event.target.value);
+});
+node('console').addEventListener('change', event => send('console', event.target.checked ? 'on' : 'off'));
+node('logs-control').addEventListener('toggle', event => send('diagnostics', event.target.open ? 'on' : 'off'));
+node('drawer-toggle').addEventListener('click', event => {
+  drawer.hidden = !drawer.hidden;
+  layout.classList.toggle('wide', drawer.hidden);
+  event.target.setAttribute('aria-expanded', !drawer.hidden);
+  send('diagnostics', !drawer.hidden && node('logs-control').open ? 'on' : 'off');
+  applyMotion();
+});
+node('windows-toggle').addEventListener('click', event => {
+  const popup = node('windows-popup');
+  popup.hidden = !popup.hidden;
+  event.target.setAttribute('aria-expanded', !popup.hidden);
+  if (!popup.hidden) { send('windows'); node('window-filter').focus(); }
+});
+node('window-filter').addEventListener('input', renderWindows);
+node('suggestion').addEventListener('click', event => {
+  prompt.value = event.target.dataset.example;
+  updateSend();
+  prompt.focus();
+});
+node('motion').addEventListener('click', event => {
+  motionRequested = !motionRequested;
+  event.target.setAttribute('aria-pressed', motionRequested);
+  event.target.textContent = motionRequested ? 'Pause reactor' : 'Animate reactor';
+  applyMotion();
+});
+prompt.addEventListener('input', updateSend);
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && state.busy) { event.preventDefault(); send('stop'); }
+  if (event.key === 'Enter' && event.ctrlKey && !node('send').disabled) {
+    event.preventDefault();
+    send('send', prompt.value);
+  }
+});
+node('send').addEventListener('click', () => send('send', prompt.value));
+updateMetrics({ processes: [] });
+updateModel({ model: 'Qwen 3.5 4B' });
+node('motion').textContent = motionRequested ? 'Pause reactor' : 'Animate reactor';
+node('motion').setAttribute('aria-pressed', motionRequested);
+applyMotion();
+send('hello');

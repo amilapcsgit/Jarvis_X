@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableDefaultItems>false</EnableDefaultItems>
+    <ApplicationManifest>Jarvis.manifest</ApplicationManifest>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="*.cs"/>
+    <ApplicationDefinition Include="App.xaml"/>
+    <Page Include="MainWindow.xaml"/>
+    <EmbeddedResource Include="opencode.json"/>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3537.50"/>
+    <Content Include="web/**/*;blender_boot.py;blender_mcp_offline.py;blender_house.py;desktop_mcp.py"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true"/>
+    <Content Include="runtime/blender-scripts/addons/blender_mcp.py"
+             Condition="Exists('runtime/blender-scripts/addons/blender_mcp.py')"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true"/>
+  </ItemGroup>
+</Project>
