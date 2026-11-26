@@ -55,6 +55,11 @@ small { font:10px var(--mono); letter-spacing:.09em; color:#9cb4c7; }
 .key-hint { margin-left:auto; }
 .key-hint + #send { margin-left:6px; }
 .desktop-controls { padding:10px; position:relative; z-index:3; }
+#models-panel { position:absolute; inset:72px 18px auto; z-index:6; background:#0a1a2a; }
+#models-panel .desktop-row { flex-wrap:wrap; }
+#model-tag { background:#0c2233; color:inherit; border:1px solid #2a4a60; border-radius:5px; padding:7px 9px; }
+#model-error { color:#ff9aa7; }
+#blend-path,#checkpoint-path { overflow-wrap:anywhere; user-select:text; }
 .desktop-controls details { margin-top:5px; }
 .desktop-controls details > div { padding-top:7px; }
 #window-filter { display:block; width:100%; margin:8px 0; }

@@ -25,6 +25,7 @@ public partial class MainWindow : Window
     IReadOnlyList<DesktopTarget> targets = [];
     DesktopTarget? selected;
     RunScope? scope;
+    string? activeRunId;
     CancellationTokenSource? run;
     JsonNode? pending;
     nint focusHook;
@@ -32,12 +33,15 @@ public partial class MainWindow : Window
     bool hotkeyRegistered;
     string? session, attachment, lastImage;
     string agent = "chat";
-    bool inkling, ready, deciding, stopping, closing, allowClose, diagnostics;
+    CancellationTokenSource metricsRun = new();
+    bool inkling, ready, deciding, stopping, hardStopped, closing, allowClose, diagnostics;
+    Task? webStartup;
+    TaskCompletionSource<bool>? chatApproval;
     int viewEpoch;
     Window? diagnosticWindow;
     System.Windows.Controls.TextBox? consoleOutput;
     string status = "Starting local services…";
-    string modelName => inkling ? "Inkling 2 Mini" : "Qwen 3.5 4B";
+    string modelName => inkling ? "Inkling 2 Mini" : SelectedTag;
     string Route => "session/" + session;
     string ProjectFile => Path.Combine(backend.Home, "last-project-v2.txt");
     string SessionFile => Path.Combine(backend.Home, "last-session-v2.txt");
@@ -48,6 +52,14 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        string iconPath = Path.Combine(AppContext.BaseDirectory, "web", "assets", "jarvis.ico");
+        if (File.Exists(iconPath))
+        {
+            using var iconStream = File.OpenRead(iconPath);
+            Icon = System.Windows.Media.Imaging.BitmapFrame.Create(iconStream,
+                System.Windows.Media.Imaging.BitmapCreateOptions.None,
+                System.Windows.Media.Imaging.BitmapCacheOption.OnLoad);
+        }
         focusChanged = ForegroundChanged;
         SourceInitialized += (_, _) =>
         {
@@ -56,7 +68,7 @@ public partial class MainWindow : Window
             nativeWindow.AddHook(WindowMessage);
             hotkeyRegistered = RegisterHotKey(nativeWindow.Handle, 1, 0x4006, 0x7B);
             if (hotkeyRegistered)
-                StopButton.ToolTip = "Interrupt the active run and release the desktop. Ctrl+Shift+F12 works from another app.";
+                StopButton.ToolTip = "Kill Jarvis workers and revoke approvals. Unsaved work in Jarvis-started Blender can be lost. Ctrl+Shift+F12 also works.";
         };
         Loaded += async (_, _) => await Start();
         Closing += ClosingWindow;
@@ -84,24 +96,35 @@ public partial class MainWindow : Window
 
     async Task Start()
     {
+        _ = ServeDiagnostics(lifetime.Token);
         focusHook = DesktopTarget.Native.SetWinEventHook(3, 3, 0, focusChanged, 0, 0, 0);
         try
         {
             string settings = File.Exists(ProjectFile) ? ProjectFile : Path.Combine(backend.Home, "last-project.txt");
             string previous = File.Exists(settings) ? File.ReadAllText(settings) : "";
             if (Directory.Exists(previous)) backend.Project = previous;
-            await OpenWeb();
+            webStartup = OpenWeb();
+            await webStartup;
+            if (hardStopped) return;
             _ = CollectMetrics();
             SetStatus("Connecting to local OpenCode…");
             await backend.Connect();
+            if (hardStopped) return;
             session = File.Exists(SessionFile) ? File.ReadAllText(SessionFile).Trim() : null;
             await LoadHistory();
             if (session != null) await RefreshMessages();
             ready = true;
-            SetStatus("Workspace ready · Qwen starts on demand");
+            SetStatus("Workspace ready");
+            if (File.Exists(ModelFile))
+            {
+                string savedModel = File.ReadAllText(ModelFile).Trim();
+                if (Backend.IsLocalTag(savedModel)) preferredTag = savedModel;
+            }
+            await ModelCommand("models-refresh", "");
         }
         catch (Exception ex)
         {
+            if (hardStopped) return;
             ready = Workspace.CoreWebView2 != null;
             WebError.Text = "Reactor workspace unavailable. " + ex.Message;
             SetStatus(ex.Message);
@@ -112,8 +135,9 @@ public partial class MainWindow : Window
     async Task OpenWeb()
     {
         var options = new CoreWebView2EnvironmentOptions("--disable-background-networking --disable-component-update --disable-sync");
-        var environment = await CoreWebView2Environment.CreateAsync(null, Path.Combine(backend.Home, "webview"), options);
+        var environment = await CoreWebView2Environment.CreateAsync(null, Path.Combine(backend.Home, "webview-private-" + Environment.ProcessId), options);
         await Workspace.EnsureCoreWebView2Async(environment);
+        if (hardStopped) return;
         var web = Workspace.CoreWebView2;
         web.SetVirtualHostNameToFolderMapping("reactor.example", Path.Combine(AppContext.BaseDirectory, "web"), CoreWebView2HostResourceAccessKind.Deny);
         web.Settings.AreHostObjectsAllowed = false;
@@ -142,7 +166,7 @@ public partial class MainWindow : Window
 
     void Post(string type, object? value)
     {
-        if (Workspace.CoreWebView2?.Source != Page || allowClose) return;
+        if (hardStopped || Workspace.CoreWebView2?.Source != Page || allowClose) return;
         try { Workspace.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { type, value })); }
         catch (InvalidOperationException) { }
     }
@@ -155,16 +179,85 @@ public partial class MainWindow : Window
         PostState();
     }
 
-    string? blenderGrantProject, blenderPythonGrantProject;
-    bool BlenderPythonGrant => string.Equals(blenderPythonGrantProject, backend.Project, StringComparison.OrdinalIgnoreCase);
+    sealed record ChatGrant(string Chat, string Project, string Mode, string? Target);
+    readonly Dictionary<string, ChatGrant> grants = new(StringComparer.Ordinal);
+    ChatGrant? CurrentGrant => session != null && grants.TryGetValue(session, out var grant) ? grant : null;
+    bool Covers(string mode, string project, string? target = null) => CurrentGrant is { } grant &&
+        grant.Mode == mode && grant.Target == target &&
+        string.Equals(grant.Project, Path.GetFullPath(project), StringComparison.OrdinalIgnoreCase);
+    void RevokeChatGrant()
+    {
+        if (session != null) grants.Remove(session);
+    }
+
+    static readonly HashSet<string> BlenderActions = new(StringComparer.Ordinal)
+    {
+        "blender_build_house", "blender_look", "blender_get_scene_info", "blender_get_addon_status",
+        "blender_execute_blender_code", "blender_save_project", "blender_put_parts"
+    };
+    static readonly HashSet<string> DesktopActions = new(StringComparer.Ordinal)
+    {
+        "windows_mcp_Snapshot", "windows_mcp_Screenshot", "windows_mcp_Click", "windows_mcp_Type", "windows_mcp_Shortcut"
+    };
+    static readonly HashSet<string> BaselineBuild = new(StringComparer.Ordinal)
+    {
+        "git_status", "git_diff", "dotnet_build", "dotnet_test", "dotnet_run", "python_test", "npm_build", "npm_test", "npm_start"
+    };
+    static bool KnownFamily(string family) => BaselineBuild.Contains(family) || family is "dotnet_restore" or "python_pytest";
+    RunJournal? journal;
+    string? lastBuildPrompt, lastBuildImage, currentRunOutput;
+    bool lastRunOk;
+    JsonNode? recoveredPermissionInput;
+    int autoAttempts;
+    (string Id, string Arguments, bool Covered)? presentedApproval;
+    DateTime nextAutoAttempt;
+    RunJournal Journal => journal ??= new(backend.Home);
+    bool BuildGrant => Covers("build", backend.Project);
+    bool BlenderGrant => Covers("blender", backend.Project);
+    bool DesktopGrant => selected is { } item && Covers("desktop", backend.Project, item.Id);
+    void ClearGrants() => grants.Clear();
     const string BlenderPythonAction = "blender_execute_blender_code";
-    void ClearBlenderGrants() => blenderGrantProject = blenderPythonGrantProject = null;
-    bool BlenderGrant => string.Equals(blenderGrantProject, backend.Project, StringComparison.OrdinalIgnoreCase);
-    static bool SessionBlenderTool(string action) => action is "blender_build_house" or "blender_look";
+
+    bool IsCoveredAction(RunScope active, string action, string family) => active.Agent switch
+    {
+        "blender" => BlenderActions.Contains(action),
+        "desktop" => DesktopActions.Contains(action),
+        "build" => action == "build_run" && KnownFamily(family),
+        _ => false
+    };
+    bool HasGrant(RunScope active, JsonNode request, string family) =>
+        Covers(active.Agent, active.Project, active.Target?.Id) &&
+        IsCoveredAction(active, Action(request), family);
+
+    async Task<bool> ApproveChat(RunScope active, CancellationToken cancel)
+    {
+        if (active.Agent is not ("blender" or "desktop" or "build") ||
+            Covers(active.Agent, active.Project, active.Target?.Id)) return true;
+        var decision = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        chatApproval = decision;
+        Post("permission", new { id = "chat", action = "Allow this chat", target = active.Destination,
+            arguments = "", fullInput = true, group = active.Agent, chatGrant = true });
+        SetStatus("Waiting for chat approval");
+        try
+        {
+            if (!await decision.Task.WaitAsync(cancel)) { SetStatus("Chat approval rejected"); return false; }
+            cancel.ThrowIfCancellationRequested();
+            if (hardStopped || session == null) return false;
+            grants[session] = new(session, active.Project, active.Agent, active.Target?.Id);
+            Journal.Write(active.Id, "authorization", state: "Approved", detail: "Chat grant for " + active.Agent);
+            PostState();
+            return true;
+        }
+        finally
+        {
+            chatApproval = null;
+            Post("permission", null);
+        }
+    }
 
     void PostState() => Post("state", new
     {
-        ready, status, agent, inkling, blenderGrant = BlenderGrant, blenderPythonGrant = BlenderPythonGrant, busy = run != null || stopping, deciding,
+        ready, status, agent, inkling, blenderGrant = BlenderGrant, desktopGrant = DesktopGrant, buildGrant = BuildGrant, acceptCodex, canContinueBlender = lastBuildPrompt != null, busy = run != null || stopping || refreshingModels, deciding,
         project = backend.Project, session, attachment = attachment == null ? null : Path.GetFileName(attachment),
         target = selected?.Id, forceBlender = backend.OwnsBlender, console = diagnosticWindow != null
     });
@@ -173,6 +266,7 @@ public partial class MainWindow : Window
     {
         if (request is not JsonObject) return;
         string command = S(request["command"]), value = S(request["value"]);
+        if (hardStopped) return;
         if (command == "hello")
         {
             PostState();
@@ -180,12 +274,20 @@ public partial class MainWindow : Window
             if (ready) { await LoadHistory(); ResetView(); await RefreshMessages(); }
             return;
         }
-        if (command == "revoke-blender") { ClearBlenderGrants(); PostState(); return; }
-        if (command == "stop") { await EmergencyStop(); return; }
+        if (command is "model" or "models-refresh" or "model-pull" or "model-cancel")
+        { await ModelCommand(command, value); return; }
+        if (command == "revoke-grants") { RevokeChatGrant(); PostState(); return; }
+        if (command == "codex-queue") { SetCodexQueue(value == "on"); return; }
+        if (command == "stop") { modelPull?.Cancel(); await EmergencyStop(); return; }
         if (command == "diagnostics") { diagnostics = value == "on"; return; }
         if (command == "permission")
         {
-            await Decide(S(request["id"]), value);
+            string id = S(request["id"]);
+            if (id == "chat")
+            {
+                if (value is "workspace-session" or "reject") chatApproval?.TrySetResult(value == "workspace-session");
+            }
+            else await Decide(id, value);
             return;
         }
         if (command == "console") { ToggleConsole(value == "on"); return; }
@@ -201,7 +303,9 @@ public partial class MainWindow : Window
         if (command == "force-blender") { await ForceBlender(); return; }
         if (command == "focus")
         {
-            if (agent == "desktop" && selected != null) await FocusTarget(selected, lifetime.Token);
+            if (agent == "desktop" && selected != null && await FocusTarget(selected, lifetime.Token)
+                && DesktopGrant && pending is { } requestToResume)
+                await Decide(RequestId(requestToResume), "granted");
             return;
         }
         if (run != null || stopping || !ready) return;
@@ -213,16 +317,24 @@ public partial class MainWindow : Window
             case "attach": Attach(); break;
             case "detach": attachment = null; PostState(); break;
             case "send": await SendMessage(value); break;
+            case "continue-blender" when lastBuildPrompt != null:
+                if (agent != "blender") RevokeChatGrant();
+                agent = "blender";
+                attachment = lastBuildImage;
+                string prompt = lastBuildPrompt;
+                lastBuildPrompt = lastBuildImage = null;
+                await SendMessage(prompt);
+                break;
             case "diff": Post("diff", await backend.Diff()); break;
             case "mode" when value is "chat" or "plan" or "build" or "blender" or "desktop":
+                if (agent != value) RevokeChatGrant();
                 agent = value;
                 PostState();
                 if (value == "desktop") await RefreshTargets();
                 break;
-            case "model" when value is "qwen" or "inkling":
-                inkling = value == "inkling"; Post("model", Telemetry.Model(modelName, [])); PostState(); break;
             case "windows": await RefreshTargets(); break;
             case "target":
+                if (selected?.Id != value && CurrentGrant?.Mode == "desktop") RevokeChatGrant();
                 selected = targets.FirstOrDefault(window => window.Id == value && window.IsAlive);
                 PostState();
                 break;
@@ -254,7 +366,12 @@ public partial class MainWindow : Window
     {
         var folder = new OpenFolderDialog { InitialDirectory = backend.Project };
         if (folder.ShowDialog(this) != true) return;
-        if (!string.Equals(backend.Project, folder.FolderName, StringComparison.OrdinalIgnoreCase)) ClearBlenderGrants();
+        if (!string.Equals(backend.Project, folder.FolderName, StringComparison.OrdinalIgnoreCase))
+        {
+            ClearGrants();
+            SetCodexQueue(false);
+            lastBuildPrompt = lastBuildImage = null;
+        }
         backend.Project = folder.FolderName;
         File.WriteAllText(ProjectFile, backend.Project);
         NewChat();
@@ -287,6 +404,7 @@ public partial class MainWindow : Window
         rowVersions.Clear();
         lastImage = null;
         Post("reset", null);
+        Post("blender-output", new { output = (string?)null, checkpoint = (string?)null });
     }
 
     void Attach()
@@ -354,7 +472,7 @@ public partial class MainWindow : Window
         catch (IOException) { run?.Cancel(); }
     }
 
-    async Task PrepareSession(string title, CancellationToken cancel)
+    async Task PrepareSession(string title, bool useInkling, string tag, CancellationToken cancel)
     {
         if (session == null)
         {
@@ -366,12 +484,13 @@ public partial class MainWindow : Window
         await backend.Call(Route + "/agent", new { agent }, cancel);
         await backend.Call(Route + "/model", new { model = new
         {
-            providerID = inkling ? "inkling" : "ollama", id = inkling ? "inkling-2-mini" : "qwen3.5-pilot:4b"
+            providerID = useInkling ? "inkling" : "ollama", id = useInkling ? "inkling-2-mini" : tag
         } }, cancel);
     }
 
     async Task SendMessage(string value)
     {
+        if (hardStopped || stopping || closing || run != null || refreshingModels) return;
         string text = value.Trim();
         if (text.Length == 0 || text.Length > 100_000) return;
         DesktopTarget? target = agent == "desktop" ? selected : null;
@@ -380,18 +499,46 @@ public partial class MainWindow : Window
 
         using var current = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         run = current;
+        bool useInkling = inkling;
+        string tag = SelectedTag;
         var active = new RunScope(backend.ScopeFile, backend.Project, target, agent);
+        activeRunId = active.Id;
+        if (activeCodexTask != null) activeCodexTask.Run = active.Id;
         long started = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         string? toolFailure = null;
+        currentRunOutput = null;
+        lastRunOk = false;
+        if (agent == "build" && System.Text.RegularExpressions.Regex.IsMatch(text,
+            @"(?i)\b(blender|3d|mesh|viewport)\b|\.blend\b"))
+        { lastBuildPrompt = value; lastBuildImage = attachment; }
+        Journal.Write(active.Id, "run", state: "Running", detail: $"{active.Agent} · {modelName}");
         SetStatus("Connecting to " + modelName + "…");
         try
         {
-            if (target != null && !await FocusTarget(target, current.Token)) return;
-            await backend.Connect().WaitAsync(current.Token);
-            await backend.Model(inkling, current.Token);
+            OllamaModel? model = useInkling ? null : await backend.DescribeModel(tag, current.Token);
+            if (model != null && attachment != null && !model.Vision)
+                throw new InvalidOperationException($"{tag} cannot read images. Detach the image or choose a vision model.");
+            if (model != null && (agent is "blender" or "build" or "desktop" or "plan") && !model.Tools)
+                throw new InvalidOperationException($"{tag} cannot call tools. Choose a model with tool support.");
+            if (model != null) await backend.EnsureInferenceModel(model, current.Token);
+            await backend.Connect(model);
+            current.Token.ThrowIfCancellationRequested();
+            await PrepareSession(text[..Math.Min(text.Length, 56)], useInkling, model?.InferenceTag ?? tag, current.Token);
+            if (!await ApproveChat(active, current.Token)) return;
+            if (target != null && !await FocusTarget(target, current.Token))
+            {
+                if (!target.IsAlive)
+                    throw new InvalidOperationException("The selected desktop window closed before dispatch.");
+                Journal.Write(active.Id, "focus", state: "Paused", detail: "Awaiting the selected window before tool dispatch");
+            }
+            await backend.PrepareModel(useInkling, current.Token);
             if (agent == "blender") { SetStatus("Connecting to visible Blender…"); await backend.Blender(current.Token); }
-            if (agent is "desktop" or "blender") await WaitMcp(agent == "desktop" ? "windows_mcp" : "blender", current.Token);
-            await PrepareSession(text[..Math.Min(text.Length, 56)], current.Token);
+            if (agent is "desktop" or "blender" or "build")
+            {
+                string connector = agent == "desktop" ? "windows_mcp" : agent;
+                Journal.Write(active.Id, "connector startup", connector);
+                await WaitMcp(connector, current.Token);
+            }
             current.Token.ThrowIfCancellationRequested();
             scope = active;
             active.Publish();
@@ -430,18 +577,39 @@ public partial class MainWindow : Window
                 if (!busy && pending == null && (seenActive || i >= 10)) break;
                 await Task.Delay(360, current.Token);
             }
-            if (toolFailure != null) SetStatus(toolFailure);
+            currentRunOutput = VerifiedOutput(active);
+            lastRunOk = toolFailure == null || currentRunOutput != null;
+            Journal.Write(active.Id, "run", state: lastRunOk ? "Completed" : "Failed", detail: currentRunOutput ?? toolFailure);
+            if (toolFailure != null && !lastRunOk) SetStatus(toolFailure);
             else SetStatus("Ready · " + modelName);
         }
-        catch (OperationCanceledException) { }
-        catch (Exception ex) { if (!stopping) SetStatus(ex.Message); }
+        catch (OperationCanceledException) { Journal.Write(active.Id, "run", state: "Interrupted"); }
+        catch (Exception ex)
+        {
+            Journal.Write(active.Id, "run", state: "Failed", detail: ex.Message);
+            if (!hardStopped) SetStatus(ex.Message);
+        }
         finally
         {
             if (ReferenceEquals(scope, active)) RevokeScope();
             pending = null;
             Post("permission", null);
-            if (ReferenceEquals(run, current)) run = null;
+            if (active.Agent == "blender")
+            {
+                string checkpoint = Path.Combine(backend.Home, "checkpoints", active.Id, "before.blend");
+                bool checkpointExists = File.Exists(checkpoint);
+                if (checkpointExists) Journal.Write(active.Id, "checkpoint", "blender", "Completed", checkpoint);
+                Post("blender-output", new { output = currentRunOutput, checkpoint = checkpointExists ? checkpoint : null });
+            }
+            if (ReferenceEquals(run, current)) { run = null; activeRunId = null; }
+            if (pendingModel is { } next && !hardStopped && !closing)
+            {
+                pendingModel = null;
+                await ModelCommand("model", next);
+            }
+            if (activeCodexTask == null && !closing) PublishCodexTasks();
             PostState();
+            if (activeCodexTask == null) StartNextCodexTask();
         }
     }
 
@@ -487,7 +655,12 @@ public partial class MainWindow : Window
             if (type == "user") PublishRow(id, "You", S(entry?["text"]));
             if (type != "assistant") continue;
             bool recent = started is long time && Number(entry?["time"]?["created"]) >= time;
-            if (recent) modelEntries.Add(entry);
+            if (recent)
+            {
+                modelEntries.Add(entry);
+                string providerError = S(entry?["error"]?["message"]);
+                if (providerError.Length > 0) failure ??= providerError;
+            }
             int index = 0;
             foreach (var part in Array(entry?["content"]))
             {
@@ -555,6 +728,9 @@ public partial class MainWindow : Window
     {
         if (timeline.GetValueOrDefault(id) == item) return;
         timeline[id] = item;
+        if (scope is { } active)
+            Journal.Write(active.Id, item.State == "Running" ? "execution" : "tool status",
+                item.Tool, item.State, item.State is "Failed" or "Rejected" ? item.Detail : null);
         Post("activity", new { id, item.Tool, item.State, item.Target, item.Arguments, item.Detail });
     }
 
@@ -568,18 +744,18 @@ public partial class MainWindow : Window
         if (id.Length == 0) id = S(part?["callID"]);
         return id.Length == 0 ? null : id;
     }
-    static JsonNode? Input(JsonNode request) => request["metadata"]?["input"];
-    static string Arguments(JsonNode request) => Input(request)?.ToJsonString(Pretty)
-        ?? string.Join(Environment.NewLine, Array(request["resources"]).Select(S));
-    static string GrantKey(JsonNode request)
+    JsonNode? Input(JsonNode request)
     {
-        string action = Action(request);
-        return action is "shell" or "bash" or "blender_execute_blender_code" ? action + "\n" + Arguments(request) : action;
+        var input = request["metadata"]?["input"];
+        return input is JsonObject { Count: > 0 } ? input : recoveredPermissionInput ?? input;
     }
-
+    string Arguments(JsonNode request) => Input(request)?.ToJsonString(Pretty)
+        ?? string.Join(Environment.NewLine, Array(request["resources"]).Select(S));
     async Task ObserveApproval(JsonNode? request, JsonNode? messages)
     {
-        if (RequestId(pending) == RequestId(request)) return;
+        bool same = RequestId(pending) == RequestId(request);
+        if (same && (request == null || deciding || autoAttempts >= 2 || DateTime.UtcNow < nextAutoAttempt)) return;
+        if (!same) { autoAttempts = 0; recoveredPermissionInput = null; }
         pending = request;
         if (request == null || scope == null)
         {
@@ -587,43 +763,63 @@ public partial class MainWindow : Window
             return;
         }
         string action = Action(request);
-        string arguments = Arguments(request);
         var candidates = Array(messages?["data"]).SelectMany(entry => Array(entry?["content"]))
             .Where(part => S(part?["type"]) == "tool" && S(part?["name"]) == action &&
                 S(part?["state"]?["status"]) is "running" or "pending")
-            .Select(PartId).OfType<string>().Where(id => !permissionParts.ContainsValue(id)).ToArray();
-        if (candidates.Length == 1) permissionParts[RequestId(request)] = candidates[0];
+            .Where(part => PartId(part) is { } id && (!permissionParts.ContainsValue(id) || id == CallId(request))).ToArray();
+        if (candidates.Length == 1)
+        {
+            permissionParts[RequestId(request)] = PartId(candidates[0])!;
+            recoveredPermissionInput = candidates[0]?["state"]?["input"] ?? candidates[0]?["input"];
+        }
+        string arguments = Arguments(request);
         string target = scope.Destination;
         if (action == "blender_build_house" && Input(request) is not JsonObject { Count: > 0 })
             arguments = "Create one editable house with one window and one door.\nSave as Jarvis House.blend or the next unused numbered filename in this folder.";
         if (action == "blender_execute_blender_code" && S(Input(request)?["code"]) is { Length: > 0 } python)
             arguments = python;
-        PutItem(CallId(request), new(action, "Waiting for approval", target, arguments));
-        bool fullInput = action != "blender_execute_blender_code" || S(Input(request)?["code"]).Length != 0;
-        if (action is "shell" or "bash") fullInput = arguments.Trim().Length != 0 && arguments.Trim() != "*";
-        Post("permission", new { id = RequestId(request), action, target, arguments, fullInput, blenderSession = SessionBlenderTool(action), blenderPython = action == BlenderPythonAction });
-        if (fullInput && (scope.Grants.Contains(GrantKey(request)) || BlenderGrant && SessionBlenderTool(action) || BlenderPythonGrant && action == BlenderPythonAction))
+        var active = scope;
+        string family = S(Input(request)?["family"]);
+        bool covered = HasGrant(active, request, family);
+        bool automatic = covered && (active.Target == null || active.Target.IsForeground);
+        PutItem(CallId(request), new(action, automatic ? "Queued" : "Waiting for approval", target, arguments));
+        if (automatic)
+        {
+            autoAttempts++;
+            if (autoAttempts > 1) Journal.Write(active.Id, "retry", action, detail: "Approval reply retry");
+            nextAutoAttempt = DateTime.UtcNow.AddSeconds(1);
             await Decide(RequestId(request), "granted");
-        else SetStatus("Waiting for approval · " + action);
+            if (pending == null || autoAttempts < 2) return;
+        }
+        bool fullInput = (action != BlenderPythonAction || S(Input(request)?["code"]).Length != 0)
+            && (action is not ("shell" or "bash") || arguments.Trim() is not ("" or "*"));
+        nextAutoAttempt = DateTime.UtcNow.AddSeconds(1);
+        var presentation = (RequestId(request), arguments, covered);
+        if (presentedApproval != presentation)
+        {
+            presentedApproval = presentation;
+            Post("permission", new { id = RequestId(request), action, target, arguments, fullInput, covered });
+        }
+        SetStatus(active.Target is { IsForeground: false } && DesktopGrant
+            ? "Desktop paused · re-focus the selected window to resume" : "Waiting for approval · " + action);
     }
 
     async Task Decide(string id, string choice)
     {
-        if (choice is not ("once" or "task" or "reject" or "granted" or "blender-session" or "blender-python-session") || deciding || pending == null ||
+        if (choice is not ("once" or "reject" or "granted") || deciding || pending == null ||
             id != RequestId(pending) || scope == null || run == null || stopping) return;
         var request = pending;
         var active = scope;
         var cancel = run.Token;
         var key = CallId(request);
         string action = Action(request);
-        if (choice == "blender-session" && !SessionBlenderTool(action)) return;
-        if (choice == "blender-python-session" && (action != BlenderPythonAction || scope.Agent != "blender")) return;
+        string family = S(Input(request)?["family"]);
         bool approve = choice != "reject";
         deciding = true;
         PostState();
         try
         {
-            if (approve && action == "blender_execute_blender_code" && S(Input(request)?["code"]).Length == 0)
+            if (approve && choice == "once" && action == BlenderPythonAction && S(Input(request)?["code"]).Length == 0)
                 throw new InvalidOperationException("OpenCode did not supply the full Python script. Reject this request.");
             if (approve && action is "shell" or "bash" && (Arguments(request).Trim() is "" or "*"))
                 throw new InvalidOperationException("OpenCode did not supply the full shell command. Reject this request.");
@@ -634,7 +830,7 @@ public partial class MainWindow : Window
                 {
                     if (choice == "granted")
                     {
-                        SetStatus("Desktop paused · focus the selected window and click Approve once to resume.");
+                        SetStatus("Desktop paused · refocus the selected window to resume.");
                         return;
                     }
                     if (DesktopTarget.Native.GetForegroundWindow() != new WindowInteropHelper(this).Handle ||
@@ -643,29 +839,25 @@ public partial class MainWindow : Window
             }
             cancel.ThrowIfCancellationRequested();
             if (!ReferenceEquals(active, scope) || id != RequestId(pending)) return;
-            if (choice == "granted" && !(active.Grants.Contains(GrantKey(request)) ||
-                BlenderGrant && SessionBlenderTool(action) || BlenderPythonGrant && action == BlenderPythonAction)) return;
+            if (choice == "granted" && !HasGrant(active, request, family)) return;
+            string authorization = choice == "granted" ? "Approved by " + active.Agent + " chat grant" : choice;
             var item = timeline[key];
             PutItem(key, item with { State = approve ? "Approved" : "Rejected",
-                Detail = choice is "task" or "granted" ? "Approval scoped to this run." : null });
+                Detail = authorization });
             try { await backend.Call(Route + "/permission/" + id + "/reply", new { decision = approve ? "once" : "reject" }, cancel); }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
+                Journal.Write(active.Id, "authorization", action, "Failed", ex.Message);
                 PutItem(key, item with { Detail = "Could not send the decision. " + ex.Message });
                 throw;
             }
-            if (choice == "blender-session" && ReferenceEquals(scope, active)) blenderGrantProject = backend.Project;
-            if (choice == "blender-python-session" && ReferenceEquals(scope, active))
-            {
-                blenderPythonGrantProject = active.Project;
-                blenderGrantProject = active.Project;
-            }
-            if (choice == "task" && ReferenceEquals(scope, active)) active.Grants.Add(GrantKey(request));
+            Journal.Write(active.Id, "authorization", action, approve ? "Approved" : "Rejected", authorization);
+            if (approve) Journal.Write(active.Id, "dispatch", action, detail: family);
             if (RequestId(pending) == id) { pending = null; Post("permission", null); }
-            if (!stopping) SetStatus(approve ? "Running · " + action : "Permission rejected · " + action);
+            if (!hardStopped) SetStatus(approve ? "Running · " + action : "Permission rejected · " + action);
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { if (!stopping) SetStatus(ex.Message); }
+        catch (Exception ex) { if (!hardStopped) SetStatus(ex.Message); }
         finally { deciding = false; PostState(); }
     }
 
@@ -683,41 +875,108 @@ public partial class MainWindow : Window
     async Task EmergencyStop()
     {
         if (stopping) return;
-        stopping = true;
-        ClearBlenderGrants();
-        bool active = run != null;
-        string? route = session == null ? null : Route;
+        stopping = hardStopped = true;
+        ready = false;
+        backend.BlockLaunches();
+        modelPull?.Cancel();
+        pendingModel = null;
+        metricsRun.Cancel();
+        string runId = activeRunId ?? "host";
+        ClearGrants();
+        SetCodexQueue(false);
         RevokeScope();
         run?.Cancel();
-        if (pending is { } request && timeline.TryGetValue(CallId(request), out var item))
-            PutItem(CallId(request), item with { State = "Rejected", Detail = "Emergency Stop cleared this request." });
+        chatApproval?.TrySetCanceled();
         pending = null;
-        foreach (var entry in timeline.Where(entry => entry.Value.State is "Running" or "Approved" or "Queued").ToArray())
-        {
-            string detail = entry.Value.Tool.StartsWith("blender_", StringComparison.Ordinal)
-                ? "Emergency Stop detached Jarvis. An operation already sent to Blender may finish in the open window."
-                : "Emergency Stop interrupted the run.";
-            PutItem(entry.Key, entry.Value with { State = "Interrupted", Detail = detail });
-        }
-        Post("permission", null);
-        SetStatus("Emergency Stop · releasing the run");
+        SetStatus("Emergency Stop · terminating Jarvis workers");
+        Journal.Write(runId, "emergency stop", state: "Interrupted", detail: "Revoked all chat grants and disabled the queue");
+        var workerStop = Task.Run(backend.StopExecution);
+        try { if (webStartup != null) await webStartup.WaitAsync(TimeSpan.FromSeconds(2)); } catch (Exception) { }
+        var webStop = StopPrivateWebView();
+        var failures = (await workerStop).Concat(await webStop).ToArray();
+        stopping = false;
+        ResumeButton.Visibility = failures.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        Journal.Write(runId, "worker termination", state: failures.Length == 0 ? "Completed" : "Failed",
+            detail: failures.Length == 0 ? "No owned workers remain" : string.Join(", ", failures));
+        SetStatus(failures.Length == 0 ? "Stopped · all Jarvis workers exited" : "Stop incomplete · " + string.Join(", ", failures));
+        WebError.Text = failures.Length == 0 ? "Jarvis is stopped. Resume to start a fresh workspace." : status;
+    }
+
+    async Task<string[]> StopPrivateWebView()
+    {
         try
         {
-            if (active && route != null)
-            {
-                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-                await backend.Call(route + "/interrupt", new { }, timeout.Token);
-            }
+            var environment = Workspace.CoreWebView2?.Environment;
+            if (environment != null)
+                foreach (var info in environment.GetProcessInfos())
+                {
+                    try
+                    {
+                        if (webProcesses.Any(p => p.Id == info.ProcessId)) continue;
+                        var process = Process.GetProcessById(info.ProcessId);
+                        _ = process.Handle; // Hold identity through browser shutdown.
+                        webProcesses.Add(process);
+                    }
+                    catch (ArgumentException) { }
+                    catch (System.ComponentModel.Win32Exception) { }
+                }
         }
-        catch (Exception) { }
-        finally
+        catch (InvalidOperationException) { }
+        Workspace.Visibility = Visibility.Hidden;
+        Workspace.Dispose();
+        WorkspaceHost.Children.Remove(Workspace);
+        return await Task.Run(() =>
         {
-            bool terminated = !active || await Task.Run(backend.StopExecution);
-            Post("connector", new { name = "windows_mcp", state = "released" });
-            Post("connector", new { name = "blender", state = "detached" });
-            stopping = false;
-            SetStatus(terminated ? "Stopped · desktop released · Blender kept open" : "Desktop released · worker shutdown could not be confirmed");
+            var survivors = new List<string>();
+            foreach (var process in webProcesses.ToArray())
+            {
+                try
+                {
+                    if (!process.HasExited)
+                    {
+                        process.Kill();
+                        if (!process.WaitForExit(1500)) { survivors.Add($"{process.ProcessName} ({process.Id})"); continue; }
+                    }
+                }
+                catch (InvalidOperationException) { }
+                catch (System.ComponentModel.Win32Exception)
+                {
+                    survivors.Add($"WebView2 ({process.Id})");
+                    continue;
+                }
+                process.Dispose();
+                webProcesses.Remove(process);
+            }
+            return survivors.ToArray();
+        });
+    }
+
+    readonly List<Process> webProcesses = [];
+
+    async void Resume(object sender, RoutedEventArgs e)
+    {
+        if (!hardStopped || stopping || closing || run != null) return;
+        ResumeButton.Visibility = Visibility.Collapsed;
+        hardStopped = false;
+        backend.ResumeLaunches();
+        metricsRun.Dispose();
+        metricsRun = new();
+        Workspace = new Microsoft.Web.WebView2.Wpf.WebView2 { Visibility = Visibility.Hidden };
+        WorkspaceHost.Children.Add(Workspace);
+        try
+        {
+            webStartup = OpenWeb();
+            await webStartup;
+            if (hardStopped) return;
+            await backend.Connect();
+            if (hardStopped) return;
+            ResetView();
+            await LoadHistory();
+            if (session != null) await RefreshMessages();
+            ready = true;
+            SetStatus("Ready · chat approval required");
         }
+        catch (Exception ex) { if (!hardStopped) SetStatus(ex.Message); }
     }
 
     async Task ForceBlender()
@@ -761,11 +1020,13 @@ public partial class MainWindow : Window
             using var sampler = await Task.Run(() => new Telemetry(), cancel);
             while (!cancel.IsCancellationRequested)
             {
+                if (hardStopped) { await Task.Delay(500, cancel); continue; }
+                var metricsToken = metricsRun.Token;
                 int[] web = Workspace.CoreWebView2?.Environment.GetProcessInfos()
                     .Select(process => process.ProcessId).ToArray() ?? [];
                 bool logs = diagnostics || consoleOutput != null;
-                var sample = await Task.Run(() => (sampler.Sample(backend.RuntimePids(), web, cancel),
-                    logs ? backend.ReadLogs() : null), cancel);
+                var sample = await Task.Run(() => (sampler.Sample(backend.RuntimePids(), web, metricsToken),
+                    logs ? string.Join(Environment.NewLine, Journal.Read(limit: 18).Select(item => item?.ToJsonString())) + Environment.NewLine + backend.ReadLogs() : null), cancel);
                 if (cancel.IsCancellationRequested) break;
                 Post("metrics", sample.Item1);
                 if (sample.Item2 != null)
@@ -790,8 +1051,11 @@ public partial class MainWindow : Window
         e.Cancel = true;
         if (closing) return;
         closing = true;
-        if (run != null) await EmergencyStop();
+        if (!hardStopped) await EmergencyStop();
+        SetCodexQueue(false);
+        ClearGrants();
         lifetime.Cancel();
+        metricsRun.Dispose();
         if (hotkeyRegistered && nativeWindow != null) UnregisterHotKey(nativeWindow.Handle, 1);
         if (focusHook != 0) DesktopTarget.Native.UnhookWinEvent(focusHook);
         await Task.Run(backend.Dispose);

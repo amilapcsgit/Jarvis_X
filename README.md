@@ -15,6 +15,26 @@
 
 *Example house rendered locally in Blender. The structured house tool creates editable geometry and procedural materials.*
 
+## Install with the Windows setup app
+
+1. Download **Jarvis_X_Setup.exe** and its SHA-256 file from [GitHub Releases](https://github.com/amilapcsgit/Jarvis_X/releases/latest). Sign in to an account with repository access if GitHub asks.
+2. If you want to verify the download, compare `(Get-FileHash .\Jarvis_X_Setup.exe -Algorithm SHA256).Hash` in PowerShell with the published checksum.
+3. Double-click the installer on Windows x64. Select the installation folder, keep or choose the shared Ollama model folder, and select any optional models. Setup reuses compatible dependencies and uses Windows Package Manager for missing system prerequisites. It needs internet access for missing runtimes and models. Installed inference uses the local Ollama endpoint.
+
+Setup previews shared settings before changing them and restarting the Ollama Windows app. Changing the model directory may require downloading the models again. Existing files stay in the original directory. Restarting Ollama can interrupt its other clients. Rerun setup to retry failed downloads. Setup installs to `%LOCALAPPDATA%\Programs\Jarvis_X` by default, creates a Start menu shortcut, and offers a desktop shortcut. To update, close Jarvis and rerun setup into the same folder. Jarvis keeps chat history, logs, and checkpoints in its local data directory.
+
+The Windows package manager (WinGet) is required if setup needs to install system dependencies. Have enough space for the baseline model and any optional models you choose. The optional RTX 2080 profile adjusts the shared Ollama server, including its cache and parallelism settings.
+
+From source, run `./Build-Installer.ps1` with the .NET 10 SDK. The result is `publish-installer/Jarvis_X_Setup.exe`.
+
+## Switch models in Jarvis
+
+Open **Models**, choose an installed tag, or enter a public Ollama tag to download. The selector shows image and tool support. Changes during a run apply to the next run in the same conversation. Cancel an in-progress download and select **Download** again to retry. If Ollama is unavailable, start the Windows Ollama app and refresh the list.
+
+Setup defaults to the installed Qwen 3.5 4B pilot or official tag. The Qwen 9B Q4_K_M build is optional. The 3D Coder package is a Three.js fine-tune and Bonsai is an unofficial package. Compare both with the 4B baseline before using them for Blender work. MCP health checks report loaded VRAM and context while a model is in memory. Jarvis caps its Ollama context at 8K for the standard 4B baseline tags and 4K for other models. When needed it creates a local alias that shares the installed weights.
+
+For an asset brief, include overall dimensions and a reference image when available. Jarvis builds named editable parts, takes a Solid viewport preview, and shows the verified output and pre-edit checkpoint under **Preview**. Follow-up prompts can refine the same named parts and save a new revision. The Blender chat grant also covers custom Python. Review the scope on the approval card before allowing it.
+
 ## How it fits together
 
 ```mermaid
@@ -26,7 +46,7 @@ flowchart LR
   B --> P["Local project · editable .blend"]
 ```
 
-## Reproduce the setup on Windows
+## Build and run from source
 
 1. Install [Git for Windows](https://git-scm.com/download/win), [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows), the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0), the [WebView2 Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/), [Node.js](https://nodejs.org/), [uv](https://docs.astral.sh/uv/getting-started/installation/), [Ollama for Windows](https://ollama.com/download/windows), and [Blender](https://www.blender.org/download/). Blender 5.2 was used for the original setup.
 2. Clone the repository and install the pinned OpenCode V2 CLI in a user-local directory. [OpenCode installation](https://opencode.ai/docs/)
@@ -54,7 +74,7 @@ flowchart LR
 
    ```powershell
    .\Setup-Jarvis.ps1 -DownloadDependencies
-   .\publish-v2\Jarvis.exe
+   .\publish-workspace\Jarvis.exe
    ```
 
    The first setup needs internet for tools, packages, and model weights. Subsequent setup can use the installed cache by omitting `-DownloadDependencies`. Keep the `web` and `runtime` folders and Python files next to the executable. To create a desktop shortcut after verification, run `.\Setup-Jarvis.ps1 -PromoteShortcut`.
@@ -65,7 +85,21 @@ flowchart LR
 2. Try *Create a two-story house with French windows and one entrance. Save an editable Blender file.*
 3. Review the operation and approve it. The **Preview** area displays captures, and **Operations** shows the script, outcome, and any errors. For custom models, answer design questions in the same conversation so Jarvis can continue from the current scene.
 
-**Allow Blender Python for this session** also covers revised scripts and previews in the selected project. Blender Python runs with your Windows account permissions. **Revoke**, changing projects, **Emergency Stop**, and closing Jarvis clear the session grant. Use **Ctrl+Shift+F12** for Emergency Stop when the app registers that shortcut.
+**Allow this chat** authorizes the capabilities listed on the card for that conversation, project, and mode. Desktop approval also applies to the selected window and process. Blender Python runs with your Windows account permissions. Build asks separately for unrestricted shell commands. Use **Revoke** to clear the current approval.
+
+**Emergency Stop** or **Ctrl+Shift+F12** clears all chat approvals, disables Codex submissions, and terminates Jarvis-owned workers. Unsaved work in Jarvis-started Blender can be lost. Existing scenes receive a pre-edit checkpoint under the local Jarvis runtime. **Resume** starts new workers and requires fresh approvals.
+
+### Verify the local workflow
+
+| Mode | Quick check |
+| --- | --- |
+| Chat | Send a short prompt. Attach a small reference image to check vision support. |
+| Blender | In a disposable project, ask for a simple object from a reference. Inspect **Preview**, request a change in the same chat, and reopen the resulting `.blend`. |
+| Desktop | Open a disposable Notepad file, choose its window in Jarvis, and approve the chat. Ask Jarvis to type a phrase once and save with Ctrl+S. Refocus the selected window if input pauses. |
+| Build | Open a disposable Git project, approve the chat, and request a supported test command followed by a Git diff. |
+| Emergency Stop | Start a disposable run, press **Emergency Stop**, and wait for the native worker status. **Resume** starts fresh workers. |
+
+Once setup has cached the dependencies and model weights, disconnect from the internet and repeat the checks that only use local files and apps.
 
 ### Optional Inkling model
 
@@ -82,3 +116,11 @@ Qwen is the default and needs only Ollama. To use Inkling, install a compatible 
 | Desktop target changes | Refocus the selected window and request a fresh snapshot before more input |
 
 OpenCode history and logs live under `%LOCALAPPDATA%\Jarvis`. The repository contains app source, setup files, Reactor assets, and a demo render. Bundled font and Three.js notices are in [web/licenses](web/licenses).
+
+### Diagnose or submit Blender tasks from Codex
+
+From the source checkout, run `.\Setup-Jarvis.ps1 -RegisterCodexMcp`, then restart Codex and check `codex mcp get jarvis-local`. The installer itself does not register the MCP server in Codex. Open Jarvis under the same Windows account. In Jarvis, expand Model and runtime details to enable Accept Codex tasks for this session. Each queued task opens a Blender chat in the selected project and requests one approval in the app. It accepts a modeling prompt and an optional project-relative reference image.
+
+Use `get_status` for readiness, `get_recent_errors` and `get_run` for redacted traces, and `run_health_check` for the Blender, standalone SDK, OpenCode, and model probes. Use `submit_blender_task` to queue work and `get_task` to read progress and a verified `.blend` path. The MCP subprocess speaks stdio to Codex and connects to Jarvis over a same-user Windows named pipe.
+
+Setup prepares the official Blender 5.2.2 Python module in a dedicated Python 3.13 environment and verifies a disposable mesh save and reopen. The viewport remains in the running Blender app. See [the glossary](GLOSSARY.md) for approval and run terminology.

@@ -118,7 +118,6 @@ sealed class RunScope(string file, string project, DesktopTarget? target, string
     public string Project { get; } = Path.GetFullPath(project);
     public DesktopTarget? Target { get; } = target;
     public string Agent { get; } = agent;
-    public HashSet<string> Grants { get; } = new(StringComparer.Ordinal);
     public int FocusVersion { get; private set; }
     public string Destination => Target?.Label ?? Project;
 
@@ -140,7 +139,6 @@ sealed class RunScope(string file, string project, DesktopTarget? target, string
 
     public void Revoke()
     {
-        Grants.Clear();
         File.Delete(file);
     }
 }

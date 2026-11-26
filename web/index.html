@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'none'; worker-src 'none'; base-uri 'none'; form-action 'none'">
   <title>Jarvis 2 · Local workspace</title>
+  <link rel="icon" href="assets/jarvis.ico">
   <link rel="stylesheet" href="hud.css">
   <link rel="stylesheet" href="jarvis.css">
   <script defer src="jarvis.js"></script>
@@ -16,7 +17,7 @@
       <div class="rail-label"><span class="brand-core"></span><div><small>WORKSPACE</small><strong id="project-name">Local project</strong></div></div>
       <p id="project"></p>
       <div class="rail-actions"><button data-command="folder">Open folder</button><button data-command="diff">Git diff</button></div>
-      <div id="blender-grant" hidden><span id="blender-grant-label">Blender session allowed</span> <button data-command="revoke-blender">Revoke</button></div>          <h2 class="section-title">System resources</h2><div class="stats" id="stats"></div><div class="rail-divider"></div>
+      <div id="blender-grant" hidden><span id="blender-grant-label">Blender session allowed</span> <button data-command="revoke-grants">Revoke</button></div>          <h2 class="section-title">System resources</h2><div class="stats" id="stats"></div><div class="rail-divider"></div>
       <div class="rail-heading"><h2>Conversations</h2><button class="new" data-command="new" aria-label="New conversation">＋</button></div>
       <div id="history"></div>
       <p class="local-label"><i class="dot"></i> Local inference</p>
@@ -26,11 +27,27 @@
         <div><small>LOCAL AGENT</small><h1>Workspace</h1></div>
         <div class="toolbar">
           <label class="sr" for="mode">Agent mode</label><select id="mode" data-select="mode"><option value="chat">Chat</option><option value="plan">Plan</option><option value="build">Build</option><option value="blender">Blender</option><option value="desktop">Desktop</option></select>
-          <label class="sr" for="model">Model</label><select id="model" data-select="model"><option value="qwen">Qwen 3.5 4B</option><option value="inkling">Inkling 2 Mini</option></select>
+          <button id="models-toggle" aria-controls="models-panel" aria-expanded="false">Models</button>
           <button id="show-blender" data-command="show-blender" hidden>Show Blender</button>
-          <button id="drawer-toggle" aria-controls="drawer" aria-expanded="true">Activity</button>
+          <button id="continue-blender" data-command="continue-blender" hidden>Continue in Blender</button><button id="drawer-toggle" aria-controls="drawer" aria-expanded="true">Activity</button>
         </div>
       </header>
+      <section id="models-panel" class="panel desktop-controls" aria-label="Local models" hidden>
+        <div class="desktop-row"><label for="model">Active model</label><select id="model" data-select="model" disabled></select>
+          <button data-command="models-refresh">Refresh</button></div>
+        <p id="model-capabilities" role="status"></p>
+        <div class="desktop-row"><label for="model-tag">Download model</label>
+          <input id="model-tag" list="model-presets" maxlength="200" placeholder="name:tag">
+          <datalist id="model-presets">
+            <option value="qwen3.5:4b">Default 4B</option>
+            <option value="qwen3.5:9b-q4_K_M">9B candidate · 6.6 GB download</option>
+            <option value="maternion/qwen3.5-3d-coder:4b">Experimental Three.js fine-tune</option>
+            <option value="MichelRosselli/bonsai-27b:Q1_0">Experimental Bonsai</option>
+          </datalist>
+          <button id="model-download">Download</button><button id="model-cancel" data-command="model-cancel" hidden>Cancel</button>
+        </div>
+        <p id="model-progress" role="status"></p><p id="model-error" role="alert"></p>
+      </section>
       <section id="desktop-controls" class="panel desktop-controls" hidden>
         <div class="desktop-row"><button id="windows-toggle" aria-controls="windows-popup" aria-expanded="false">Choose a window ▾</button><button data-command="focus" id="focus">Focus target</button><button data-command="windows">Refresh windows</button></div>
         <div id="windows-popup" hidden><label class="sr" for="window-filter">Search windows</label><input id="window-filter" type="search" placeholder="Search by title or process"><div id="windows"></div></div>
@@ -40,7 +57,7 @@
       </section>
                 <div id="overview" class="panel reactor"><div class="panel-label"><span>REACTOR CORE</span><span class="core-mode">STATIC</span></div>
             <div id="core-stage" class="core-stage"><img class="halo" src="assets/hud/reactor-halo.png" alt=""></div>
-            <div class="core-readout"><strong id="core-state">Starting</strong><span id="core-reading">Qwen 3.5 4B</span></div><button id="motion" aria-pressed="false">Animate reactor</button></div>
+            <div class="core-readout"><strong id="core-state">Starting</strong><span id="core-reading">Local model</span></div><button id="motion" aria-pressed="false">Animate reactor</button></div>
       <section class="conversation panel" id="conversation" aria-label="Conversation">
         <div id="welcome">
           <div class="hud-icon icon-3" aria-hidden="true"></div>
@@ -61,13 +78,15 @@
           <div id="permission" class="approval panel" hidden>
             <p class="approval-label">WAITING FOR APPROVAL</p><h2 id="permission-action"></h2><p id="permission-target"></p>
             <pre id="permission-args" tabindex="0"></pre>
-            <p id="python-session-note" hidden>Session approval lets later Blender Python run with your Windows account permissions.</p><div class="approval-buttons"><button class="primary" data-decision="once">Approve once</button><button data-decision="task">Approve for this task</button><button data-decision="blender-session" hidden>Allow Blender for this session</button><button data-decision="blender-python-session" hidden>Allow Blender Python for this session</button><button class="reject" data-decision="reject">Reject</button></div>
+            <p id="session-note" hidden></p><div class="approval-buttons"><button class="primary" data-decision="once">Approve once</button><button data-decision="workspace-session" hidden>Allow this chat</button><button class="reject" data-decision="reject">Reject</button></div>
           </div>
           <h2 class="section-title">Tool activity</h2><p class="empty" id="activity-empty">Actions and approvals appear here.</p>
           <div id="timeline"></div>
           <details id="diff" class="panel event" hidden><summary>Git diff</summary><pre id="diff-value" tabindex="0"></pre></details>
         </section>
-        <section id="preview" class="tab-panel"><h2 class="section-title">Latest capture</h2><p class="empty" id="preview-empty">Blender previews and desktop captures appear here.</p><img id="capture" alt="Latest tool capture" hidden></section>
+        <section id="preview" class="tab-panel"><h2 class="section-title">Latest capture</h2><p class="empty" id="preview-empty">Blender previews and desktop captures appear here.</p><img id="capture" alt="Latest tool capture" hidden>
+          <div id="blender-output" hidden><h2 class="section-title">Blender files</h2><p id="blend-path"></p><p id="checkpoint-path"></p></div>
+        </section>
         <details id="system" class="tab-panel"><summary>Model and runtime details</summary>
 
 
@@ -78,7 +97,7 @@
           <h2 class="section-title">Connectors</h2><dl id="connectors"><div><dt>Windows-MCP</dt><dd id="windows_mcp-state">Idle</dd></div><div><dt>Blender MCP</dt><dd id="blender-state">Idle</dd></div></dl>
           <label class="console-label"><input id="console" type="checkbox"> Open a separate runtime console</label>
           <button data-command="force-blender" id="force-blender" class="reject" hidden>Force Stop Blender</button>
-          <details id="logs-control"><summary>Runtime output</summary><pre id="logs" tabindex="0">Waiting for output…</pre></details>
+          <label class="console-label"><input id="codex-queue" type="checkbox"> Accept Codex tasks for this session</label><p id="codex-tasks" role="status"></p><details id="logs-control"><summary>Runtime output</summary><pre id="logs" tabindex="0">Waiting for output…</pre></details>
         </details>
       </div>
     </aside>

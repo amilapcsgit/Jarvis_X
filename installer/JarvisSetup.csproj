@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationIcon>../web/assets/jarvis.ico</ApplicationIcon>
+    <AssemblyName>Jarvis_X_Setup</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Install-Jarvis.ps1" LogicalName="install.ps1" />
+    <EmbeddedResource Include="$(JarvisPayload)" LogicalName="payload.zip" />
+  </ItemGroup>
+</Project>

@@ -63,6 +63,108 @@ else:
             raise RuntimeError("Start a Blender run before calling this tool.")
         return scope
 
+    checkpointed = None
+
+    uncertain_run = None
+
+    def dispatch(scope, code):
+        global uncertain_run
+        if uncertain_run == scope["Id"]:
+            raise RuntimeError("The last edit may have run. Inspect the scene or capture a preview before another edit.")
+        if active_scope()["Id"] != scope["Id"]:
+            raise RuntimeError("Blender run expired before dispatch.")
+        try:
+            return server.get_blender_connection().send_command("execute_code", {"code": code})
+        except Exception as error:
+            detail = str(error).lower()
+            if isinstance(error, (TimeoutError, ConnectionError)) or any(
+                phrase in detail for phrase in ("timed out", "timeout", "connection closed", "no response")
+            ):
+                uncertain_run = scope["Id"]
+            raise
+
+    def checkpoint(scope):
+        global checkpointed
+        if checkpointed == scope["Id"]:
+            return
+        output = scope_path.parent / "checkpoints" / scope["Id"] / "before.blend"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        dispatch(scope, f"import bpy\n"
+                        f"if bpy.data.filepath or bpy.context.scene.objects:\n"
+                        f"    bpy.ops.wm.save_as_mainfile(filepath={str(output)!r}, copy=True, relative_remap=False)\n")
+        checkpointed = scope["Id"]
+
+    def record_output(scope, output):
+        if active_scope()["Id"] != scope["Id"]:
+            return
+        receipt = scope_path.parent / "verified-output.json"
+        temporary = receipt.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"run": scope["Id"], "output": str(output)}), encoding="utf-8")
+        temporary.replace(receipt)
+
+    @bridge.tool()
+    def save_project(name: str) -> dict:
+        """Save and verify an editable Blend file. Supply a simple filename stem."""
+        import re
+        scope = active_scope()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 _-]{0,70}", name) or name.upper() in {
+            "CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1,10)), *(f"LPT{i}" for i in range(1,10))
+        }:
+            raise ValueError("Use a simple name of 1–71 letters, digits, spaces, underscores or hyphens.")
+        project = Path(scope["Project"]).resolve(strict=True)
+        for index in range(1, 1000):
+            output = project / (f"{name}.blend" if index == 1 else f"{name} {index}.blend")
+            if not output.exists():
+                break
+        else:
+            raise RuntimeError("No unused output name is available.")
+        dispatch(scope, f"import bpy\nfrom pathlib import Path\noutput = Path({str(output)!r})\n"
+                        "if output.exists(): raise FileExistsError(str(output))\n"
+                        "if 'FINISHED' not in bpy.ops.wm.save_as_mainfile(filepath=str(output), check_existing=False): "
+                        "raise RuntimeError('Save did not complete')\n")
+        if not output.is_file() or output.stat().st_size == 0:
+            raise RuntimeError("Blender did not produce a verified output file.")
+        record_output(scope, output)
+        return {"output": str(output), "verified": True, "bytes": output.stat().st_size}
+
+    from typing import Literal
+    from pydantic import BaseModel, Field
+
+    class Part(BaseModel):
+        name: str = Field(min_length=1, max_length=60)
+        shape: Literal["box", "wedge", "cylinder", "mesh"] = "box"
+        location: tuple[float, float, float] = (0, 0, 0)
+        size: tuple[float, float, float] = (1, 1, 1)
+        rotation: tuple[float, float, float] = (0, 0, 0)
+        color: tuple[float, float, float] = (.55, .6, .65)
+        vertices: list[tuple[float, float, float]] = Field(default_factory=list, max_length=300)
+        faces: list[list[int]] = Field(default_factory=list, max_length=300)
+
+    @bridge.tool()
+    def put_parts(collection: str, parts: list[Part]) -> dict:
+        """Create or update editable parts by name. Shape box/wedge/cylinder/mesh, location/size xyz,
+        rotation xyz degrees, color RGB 0–1. For mesh supply local vertices and polygon faces."""
+        import math
+        scope = active_scope()
+        if not collection.strip() or len(collection) > 60 or not 1 <= len(parts) <= 24:
+            raise ValueError("Use a named collection and supply 1–24 parts per call.")
+        if len({part.name for part in parts}) != len(parts):
+            raise ValueError("Part names must be unique within a call.")
+        for part in parts:
+            if not all(math.isfinite(value) and abs(value) <= 10000
+                       for row in (part.location, part.size, part.rotation, *part.vertices) for value in row):
+                raise ValueError("Geometry values must be finite and in range.")
+            if not all(0 < value <= 1000 for value in part.size) or not all(0 <= value <= 1 for value in part.color):
+                raise ValueError("Part dimensions and colors are out of range.")
+            if part.shape == "mesh" and (len(part.vertices) < 3 or not part.faces or any(
+                not 3 <= len(face) <= 24 or len(set(face)) != len(face) or
+                any(index < 0 or index >= len(part.vertices) for index in face) for face in part.faces)):
+                raise ValueError("Mesh faces must refer to distinct valid vertex indices.")
+        script = Path(__file__).with_name("blender_parts.py").read_text(encoding="utf-8")
+        values = [part.model_dump() for part in parts]
+        checkpoint(scope)
+        return dispatch(scope, f"collection_name = {collection!r}\nparts = {values!r}\n" + script)
+
     invalid_house = {}
 
     @bridge.tool()
@@ -111,13 +213,29 @@ except Exception as error:
 """
         if active_scope()["Id"] != scope["Id"]:
             raise RuntimeError("The house request belongs to an expired run.")
-        return server.get_blender_connection().send_command("execute_code", {"code": code})
+        checkpoint(scope)
+        result = dispatch(scope, code)
+        if destination.is_file() and destination.stat().st_size:
+            record_output(scope, destination)
+        return result
 
     @bridge.tool()
     def get_scene_info() -> dict:
-        """List Blender objects and their types and locations."""
-        active_scope()
-        return server.get_blender_connection().send_command("get_scene_info", read_only=True)
+        """List Blender objects, dimensions and materials."""
+        global inspect_before_edit, uncertain_run
+        code = """import bpy, json
+rows = []
+for ob in list(bpy.context.scene.objects)[:40]:
+    row = {"name": ob.name, "type": ob.type, "size": [round(v, 3) for v in ob.dimensions]}
+    if ob.type == "MESH":
+        row.update(vertices=len(ob.data.vertices), materials=[m.name for m in ob.data.materials if m][:8])
+    rows.append(row)
+print(json.dumps({"scene": bpy.context.scene.name, "count": len(bpy.context.scene.objects), "objects": rows}))
+"""
+        result = dispatch(active_scope(), code)
+        inspect_before_edit = False
+        uncertain_run = None
+        return result
 
     @bridge.tool()
     def get_addon_status() -> dict:
@@ -125,16 +243,40 @@ except Exception as error:
         active_scope()
         return server.get_blender_connection().send_command("get_addon_info", read_only=True)
 
+    python_run = None
+    python_failures = 0
+    inspect_before_edit = False
+
     @bridge.tool()
     def execute_blender_code(code: str) -> dict:
-        """Run approved Blender Python and return its printed result. Use small scripts and inspect results between edits."""
-        compile(code, "<Jarvis Blender Python>", "exec")
-        active_scope()
-        return server.get_blender_connection().send_command("execute_code", {"code": code})
+        """Execute Blender Python for edits beyond put_parts. Use short scripts."""
+        global python_run, python_failures, inspect_before_edit
+        scope = active_scope()
+        if python_run != scope["Id"]:
+            python_run = scope["Id"]
+            python_failures = 0
+            inspect_before_edit = False
+        if inspect_before_edit:
+            raise RuntimeError("The last edit may have run. Inspect scene info or take a preview before retrying.")
+        if python_failures >= 2:
+            raise RuntimeError("Python repair attempt exhausted for this run. Use put_parts for geometry or report the blocker.")
+        try:
+            compile(code, "<Jarvis Blender Python>", "exec")
+            checkpoint(scope)
+            result = dispatch(scope, code)
+        except Exception as exc:
+            python_failures += 1
+            detail = str(exc).lower()
+            inspect_before_edit = isinstance(exc, (TimeoutError, ConnectionError)) or any(
+                phrase in detail for phrase in ("timed out", "timeout", "connection closed", "no response"))
+            raise
+        python_failures = 0
+        return result
 
     @bridge.tool()
     async def look(mode: str = "viewport", shading: str = "solid", max_size: int = 512):
         """Preview the scene. Mode: viewport (default), camera, angles. Shading: solid (default), material, rendered, wireframe, xray."""
+        global inspect_before_edit, uncertain_run
         mode = mode.strip().lower()
         shading = shading.strip().lower()
         if mode in {"render", "rendered", "solid", "material", "wireframe", "xray"}:
@@ -142,6 +284,9 @@ except Exception as error:
         if mode not in {"viewport", "camera", "angles"} or shading not in {"solid", "material", "rendered", "wireframe", "xray"}:
             raise ValueError("Choose viewport, camera or angles and a supported shading mode.")
         active_scope()
-        return await server.look(None, mode=mode, shading=shading, max_size=max(200, min(768, max_size)))
+        result = await server.look(None, mode=mode, shading=shading, max_size=max(200, min(768, max_size)))
+        inspect_before_edit = False
+        uncertain_run = None
+        return result
 
     bridge.run()

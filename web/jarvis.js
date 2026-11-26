@@ -88,8 +88,13 @@ function applyState(next) {
   const lastMode = state.agent;
   const lastSelected = state.target;
   state = next;
-  node('blender-grant').hidden = !next.blenderGrant && !next.blenderPythonGrant;
-  node('blender-grant-label').textContent = next.blenderPythonGrant ? 'Blender Python allowed' : 'Blender session allowed';
+  const grants = [next.blenderGrant && 'Blender', next.desktopGrant && 'Desktop', next.buildGrant && 'Build'].filter(Boolean);
+  node('blender-grant').hidden = grants.length === 0;
+  node('blender-grant-label').textContent = grants.length ? grants.join(', ') + ' allowed' : '';
+  node('codex-queue').checked = next.acceptCodex;
+  node('codex-queue').disabled = !next.ready;
+  node('continue-blender').hidden = !next.canContinueBlender;
+  node('continue-blender').disabled = next.busy;
   const status = next.status || '';
   node('core-state').textContent = status.startsWith('Waiting for approval') ? 'Waiting for approval'
     : /failed|unavailable/i.test(status) ? 'Failed'
@@ -103,7 +108,6 @@ function applyState(next) {
   node('project-name').textContent = next.project.split(/[\\/]/).filter(Boolean).at(-1) || next.project;
   node('project-name').title = next.project;
   node('mode').value = next.agent;
-  node('model').value = next.inkling ? 'inkling' : 'qwen';
   node('desktop-controls').hidden = next.agent !== 'desktop';
   node('focus').disabled = !next.target;
   node('attachment').hidden = !next.attachment;
@@ -112,7 +116,7 @@ function applyState(next) {
   node('show-blender').hidden = next.agent !== 'blender' || !next.forceBlender;
   node('console').checked = next.console;
   const disabled = !next.ready || next.busy;
-  for (const element of document.querySelectorAll('[data-select],[data-command="folder"],[data-command="new"],[data-command="diff"],[data-command="attach"],[data-command="detach"],[data-command="windows"],[data-command="launch"],[data-command="history"],#windows-toggle')) {
+  for (const element of document.querySelectorAll('[data-select="mode"],[data-command="folder"],[data-command="new"],[data-command="diff"],[data-command="attach"],[data-command="detach"],[data-command="windows"],[data-command="launch"],[data-command="history"],#windows-toggle')) {
     element.disabled = disabled;
   }
   for (const button of document.querySelectorAll('#history button'))
@@ -215,15 +219,22 @@ function updateActivity(item) {
 
 function updateApprovalButtons() {
   for (const button of document.querySelectorAll('[data-decision]'))
-    button.disabled = state.deciding || !approval || (!approval.fullInput && button.dataset.decision !== 'reject');
+    button.disabled = state.deciding || !approval || (!approval.fullInput && !['reject', 'workspace-session'].includes(button.dataset.decision));
 }
 
 function showApproval(value) {
   approval = value;
-  document.querySelector('[data-decision=blender-python-session]').hidden = !value?.blenderPython;
-  node('python-session-note').hidden = !value?.blenderPython;
-  document.querySelector('[data-decision=task]').textContent = value?.blenderPython ? 'Allow this exact script for task' : 'Approve for this task';
-  document.querySelector('[data-decision=blender-session]').hidden = !value?.blenderSession;
+  const chatGrant = Boolean(value?.chatGrant);
+  const covered = Boolean(value?.covered);
+  document.querySelector('[data-decision=workspace-session]').hidden = !chatGrant;
+  document.querySelector('[data-decision=once]').hidden = chatGrant || covered;
+  const note = node('session-note');
+  note.hidden = !(chatGrant || covered);
+  note.textContent = covered ? 'Refocus the selected window to resume under the existing approval.' : ({
+    blender: 'Covers scene inspection, parts, Python, previews and managed saves. Python runs with your Windows account permissions.',
+    desktop: 'Covers observation and input for the selected window and process.',
+    build: 'Covers project edits, Git inspection and supported build, test, restore and run commands.',
+  })[value?.group] || '';
   node('permission').hidden = !value;
   updateApprovalButtons();
   if (!value) return;
@@ -327,6 +338,9 @@ bridge?.addEventListener('message', event => {
     case 'row': updateRow(value); break;
     case 'activity': updateActivity(value); break;
     case 'permission': showApproval(value); break;
+    case 'codex-tasks':
+      node('codex-tasks').textContent = value.map(task => task.Id.slice(0, 8) + ' · ' + task.State).join(' · ');
+      break;
     case 'sent': if (prompt.value === value) prompt.value = ''; updateSend(); break;
     case 'image':
       if (/^data:image\/(png|jpeg|webp);base64,/i.test(value)) {
@@ -345,6 +359,27 @@ bridge?.addEventListener('message', event => {
     case 'metrics': updateMetrics(value); break;
     case 'metrics-error': node('processes').title = value; break;
     case 'model': updateModel(value); break;
+    case 'models': {
+      const select = node('model');
+      const tags = [...new Set([value.selected, ...value.tags, ...(value.inklingAvailable ? ['inkling'] : [])])];
+      select.replaceChildren(...tags.map(tag => new Option(tag === 'inkling' ? 'Inkling 2 Mini' : tag, tag)));
+      select.value = value.selected;
+      select.disabled = value.refreshing || value.pulling;
+      node('models-toggle').textContent = 'Models · ' + (value.selected === 'inkling' ? 'Inkling 2 Mini' : value.selected);
+      node('model-capabilities').textContent = value.pending ? 'Next run: ' + value.pending : value.known
+        ? (value.vision ? 'Images supported' : 'Text only') + ' · ' + (value.tools ? 'Tools supported' : 'No tool calling')
+        : 'Model capabilities unavailable';
+      node('model-download').disabled = value.pulling || value.refreshing;
+      node('model-cancel').hidden = !value.pulling;
+      node('model-error').textContent = value.error || '';
+      break;
+    }
+    case 'model-progress': node('model-progress').textContent = value; break;
+    case 'blender-output':
+      node('blender-output').hidden = !value.output && !value.checkpoint;
+      node('blend-path').textContent = value.output ? 'Verified output: ' + value.output : '';
+      node('checkpoint-path').textContent = value.checkpoint ? 'Pre-edit checkpoint: ' + value.checkpoint : '';
+      break;
     case 'logs': node('logs').textContent = value || 'No runtime output yet.'; break;
     case 'connector': {
       const label = node(value.name + '-state');
@@ -373,6 +408,13 @@ document.addEventListener('change', event => {
   const { select } = event.target.dataset;
   if (select) send(select, event.target.value);
 });
+node('models-toggle').addEventListener('click', event => {
+  const panel = node('models-panel');
+  panel.hidden = !panel.hidden;
+  event.currentTarget.setAttribute('aria-expanded', !panel.hidden);
+  if (!panel.hidden) send('models-refresh');
+});
+node('model-download').addEventListener('click', () => send('model-pull', node('model-tag').value));
 node('console').addEventListener('change', event => send('console', event.target.checked ? 'on' : 'off'));
 node('logs-control').addEventListener('toggle', event => send('diagnostics', event.target.open ? 'on' : 'off'));
 node('drawer-toggle').addEventListener('click', event => {
@@ -410,8 +452,10 @@ document.addEventListener('keydown', event => {
 });
 node('send').addEventListener('click', () => send('send', prompt.value));
 updateMetrics({ processes: [] });
-updateModel({ model: 'Qwen 3.5 4B' });
+updateModel({ model: 'Local model' });
 node('motion').textContent = motionRequested ? 'Pause reactor' : 'Animate reactor';
 node('motion').setAttribute('aria-pressed', motionRequested);
 applyMotion();
 send('hello');
+
+node('codex-queue').addEventListener('change', event => send('codex-queue', event.target.checked ? 'on' : 'off'));

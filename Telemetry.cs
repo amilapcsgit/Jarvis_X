@@ -132,6 +132,7 @@ sealed class Telemetry : IDisposable
 
     static (double?, double?) Gpu(CancellationToken cancel)
     {
+        if (cancel.IsCancellationRequested) return (null, null);
         try
         {
             var info = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "nvidia-smi.exe"))

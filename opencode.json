@@ -35,7 +35,7 @@
       ]
     },
     "build": {
-      "system": "Implement the agreed change in the active project. Inspect relevant files, make focused edits, and verify the result. Use real tool calls and report what actually ran.",
+      "system": "Implement the agreed change in the active project. Inspect relevant files, make focused edits, and verify the result. Use real tool calls and report what actually ran. Use build_run for named build/test commands. For Blender or blend requests, direct the user to Continue in Blender. Do not launch Blender from a shell.",
       "permissions": [
         {
           "action": "*",
@@ -66,13 +66,18 @@
           "action": "shell",
           "resource": "*",
           "effect": "ask"
+        },
+        {
+          "action": "build_run",
+          "resource": "*",
+          "effect": "ask"
         }
       ]
     },
     "desktop": {
       "description": "Inspect and test the specified Windows app",
       "mode": "primary",
-      "system": "Use the selected window only. Call Snapshot first for window-relative coordinates. Type sends literal text into the currently focused field. Click takes x and y from Snapshot. Stop and report any focus, target, layout, or approval rejection. Never try to bypass a paused action.",
+      "system": "Use the selected window only. Call Snapshot first for window-relative coordinates. Type sends literal text into the currently focused field. Click takes x and y from Snapshot. Stop and report any focus, target, layout, or approval rejection. Never try to bypass a paused action. Use Shortcut Ctrl+S for saves. Never type shortcut names. Observe action outcomes before repeating input. Ask the user to handle a separate Save dialog.",
       "permissions": [
         {
           "action": "*",
@@ -98,6 +103,11 @@
           "action": "windows_mcp_Type",
           "resource": "*",
           "effect": "ask"
+        },
+        {
+          "action": "windows_mcp_Shortcut",
+          "resource": "*",
+          "effect": "ask"
         }
       ]
     },
@@ -114,7 +124,7 @@
     },
     "blender": {
       "mode": "primary",
-      "system": "Work in visible local Blender. Inspect attached reference images first and infer silhouette, proportions, parts, materials, and unseen sides. Ask one or two specific questions only when their answers materially change geometry, dimensions, or output. End the turn to wait for the user's reply and continue the same model on the next turn. Otherwise state a practical assumption and start building. Use the structured build_house tool when its options fit the brief. For other models use short Blender Python scripts. Prefer explicit bpy.data.meshes.new, mesh.from_pydata, bpy.data.objects.new and collection.objects.link. bpy.ops returns status sets; obtain created objects from bpy.context.object when using operators. Use only known properties such as scene.unit_settings.system and scale_length. Never clear an existing scene. Work in a dedicated named collection, keep parts editable, and limit later edits to your own collection. Build silhouette first. After a successful build, call blender_look with viewport and solid, inspect its image against the reference, then make up to three meaningful refinements and capture again when comparison is useful. If a script errors, read the traceback, inspect current state if needed, and correct the specific error once. Stop after a repeated failure and report what worked and what is still needed. Save an editable .blend to a new filename in the selected project using bpy.ops.wm.save_as_mainfile(filepath=...). Verify the path exists after saving. Report the actual file and remaining assumptions. Preserve user work and avoid network services.",
+      "system": "Work in visible local Blender. Inspect reference images first. Before the first edit, state a compact asset plan with units, overall dimensions, stable part names, and assumptions about unseen geometry. Use Blender units consistently and check the resulting dimensions with scene info. Ask one or two specific questions only when their answers materially change geometry, dimensions, or output. End the turn to wait for the user's reply and continue the same model on the next turn. Otherwise state a practical assumption and start building. Use the structured build_house tool when its options fit the brief. For other models prefer blender_put_parts for reusable editable boxes, wedges, cylinders and custom meshes. Reuse named parts to refine them. Use short Blender Python scripts for operations beyond this tool. Prefer explicit bpy.data.meshes.new, mesh.from_pydata, bpy.data.objects.new and collection.objects.link. bpy.ops returns status sets; obtain created objects from bpy.context.object when using operators. Use only known properties such as scene.unit_settings.system and scale_length. Never clear an existing scene. Work in a dedicated named collection, keep parts editable, and limit later edits to your own collection. Build silhouette first. After a successful build, call blender_look with viewport and solid, inspect its image against the reference, then make up to three meaningful refinements and capture again when comparison is useful. If a script errors, read the traceback, inspect current state if needed, and correct the specific error once. Stop after a repeated failure and report what worked and what is still needed. Save using blender_save_project with a simple filename stem. The house tool already saves. Keep Python focused on edits. Report the actual file and remaining assumptions. Preserve user work and avoid network services. After a timeout inspect the scene before a retry. Observe current geometry and capture viewport feedback between refinements.",
       "permissions": [
         {
           "action": "*",
@@ -124,12 +134,12 @@
         {
           "action": "blender_get_scene_info",
           "resource": "*",
-          "effect": "allow"
+          "effect": "ask"
         },
         {
           "action": "blender_get_addon_status",
           "resource": "*",
-          "effect": "allow"
+          "effect": "ask"
         },
         {
           "action": "blender_look",
@@ -145,6 +155,16 @@
           "effect": "ask",
           "resource": "*",
           "action": "blender_build_house"
+        },
+        {
+          "action": "blender_save_project",
+          "resource": "*",
+          "effect": "ask"
+        },
+        {
+          "action": "blender_put_parts",
+          "resource": "*",
+          "effect": "ask"
         }
       ]
     }
@@ -255,6 +275,29 @@
         "timeout": {
           "startup": 30000
         }
+      },
+      "build": {
+        "type": "local",
+        "command": [
+          "uvx",
+          "--offline",
+          "--python",
+          "3.14",
+          "--from",
+          "mcp-for-blender==2.3.1",
+          "python",
+          "JARVIS_BUILD_MCP_ENTRY"
+        ],
+        "environment": {
+          "DISABLE_TELEMETRY": "true",
+          "BLENDER_HOST": "127.0.0.1",
+          "BLENDER_PORT": "19876"
+        },
+        "codemode": false,
+        "protocol": "legacy",
+        "timeout": {
+          "startup": 30000
+        }
       }
     }
   },
@@ -287,6 +330,11 @@
     {
       "action": "mcp.use",
       "resource": "blender",
+      "effect": "allow"
+    },
+    {
+      "action": "mcp.use",
+      "resource": "build",
       "effect": "allow"
     }
   ],

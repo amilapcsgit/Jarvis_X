@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch] $PromoteShortcut, [switch] $DownloadDependencies)
+param([switch] $PromoteShortcut, [switch] $DownloadDependencies, [switch] $RegisterCodexMcp)
 
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
@@ -7,7 +7,7 @@ $env:PYTHONUTF8 = '1'
 $env:BLENDERMCP_ADDONS_DIR = Join-Path $PSScriptRoot 'runtime\blender-scripts\addons'
 $env:ANONYMIZED_TELEMETRY = 'false'
 $addon = Join-Path $env:BLENDERMCP_ADDONS_DIR 'blender_mcp.py'
-$target = Join-Path $PSScriptRoot 'publish-v2\Jarvis.exe'
+$target = Join-Path $PSScriptRoot 'publish-workspace\Jarvis.exe'
 
 if ($PromoteShortcut) {
     if (!(Test-Path -LiteralPath $target -PathType Leaf)) { throw 'Build Jarvis 2 and complete the release checks first.' }
@@ -45,6 +45,26 @@ $env:JARVIS_RUN_SCOPE = Join-Path $PSScriptRoot 'inactive-setup-scope.json'
 uvx @uvOptions --python 3.14 --from windows-mcp==0.9.0 python -c 'import runpy; runpy.run_path("desktop_mcp.py")'
 if ($LASTEXITCODE -ne 0) { throw 'Windows-MCP 0.9.0 is unavailable in the offline cache.' }
 
-dotnet publish Jarvis.csproj -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish-v2
+$sdk = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Jarvis\sdk\bpy-5.2.2'
+$sdkPython = Join-Path $sdk 'Scripts\python.exe'
+if (!(Test-Path -LiteralPath $sdkPython)) {
+    uv venv @uvOptions --python 3.13 $sdk
+    if ($LASTEXITCODE) { throw 'Could not create the Blender Python 3.13 SDK environment.' }
+}
+& $sdkPython -c 'import bpy; assert bpy.app.version == (5, 2, 2)' 2>$null
+if ($LASTEXITCODE) {
+    uv pip install @uvOptions --python $sdkPython --index-url https://pypi.org/simple 'bpy==5.2.2'
+    if ($LASTEXITCODE) { throw 'Could not install the Blender Python SDK. Use -DownloadDependencies if its wheel is missing from the cache.' }
+}
+& $sdkPython .\sdk_probe.py
+if ($LASTEXITCODE) { throw 'Blender Python SDK save and reopen probe failed.' }
+
+dotnet publish Jarvis.csproj -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish-workspace
 if ($LASTEXITCODE -ne 0) { throw 'Jarvis publish failed.' }
+if ($RegisterCodexMcp) {
+    $server = Join-Path (Split-Path $target) 'jarvis_mcp.py'
+    $uvx = (Get-Command uvx -ErrorAction Stop).Source
+    codex mcp add jarvis-local -- $uvx --offline --python 3.14 --from mcp-for-blender==2.3.1 python $server
+    if ($LASTEXITCODE) { throw 'Codex MCP registration failed.' }
+}
 Write-Output $target

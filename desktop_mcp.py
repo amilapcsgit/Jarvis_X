@@ -3,6 +3,7 @@ import ctypes as c
 import io
 import json
 import os
+import time
 from ctypes import wintypes as w
 from pathlib import Path
 
@@ -174,7 +175,9 @@ def type_text(text: str) -> str:
     """Type literal text into the focused field of the selected window. Requires a fresh observation."""
     if not 0 < len(text) <= 2000 or any(ord(char) < 32 and char not in "\r\n" for char in text):
         raise ValueError("Provide 1–2000 characters of plain text.")
+    global observation
     stamp = require_observation()
+    observation = None
     for char in text.replace("\r\n", "\n"):
         target(stamp)
         if char in "\r\n":
@@ -184,7 +187,26 @@ def type_text(text: str) -> str:
             units = [int.from_bytes(data[i:i + 2], "little") for i in range(0, len(data), 2)]
             keys = [Keyboard(0, unit, flag) for unit in units for flag in (4, 6)]
         send((Input * len(keys))(*(Input(1, Payload(keyboard=key)) for key in keys)))
+        # Let the receiving window consume VK_PACKET before the next UTF-16 payload.
+        time.sleep(0.015)
     return "Typed into the selected window."
+
+
+@mcp.tool(name="Shortcut")
+def shortcut(keys: str) -> str:
+    """Use Ctrl+S, Ctrl+A, Ctrl+Z, Escape, Tab or Enter in the selected window."""
+    global observation
+    bindings = {"ctrl+s": (17, 83), "ctrl+a": (17, 65), "ctrl+z": (17, 90),
+                "escape": (27,), "tab": (9,), "enter": (13,)}
+    chord = bindings.get(keys.lower().strip())
+    if not chord:
+        raise ValueError("Unsupported shortcut.")
+    stamp = require_observation()
+    events = [Keyboard(key, 0, 0) for key in chord] + [Keyboard(key, 0, 2) for key in reversed(chord)]
+    target(stamp)
+    observation = None
+    send((Input * len(events))(*(Input(1, Payload(keyboard=key)) for key in events)))
+    return "Shortcut sent. Observe the outcome before more input."
 
 
 if __name__ == "__main__":

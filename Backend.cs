@@ -12,15 +12,25 @@ using System.Text.Json.Nodes;
 
 namespace Jarvis;
 
-sealed class Backend : IDisposable
+sealed partial class Backend : IDisposable
 {
     readonly HttpClient local = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false });
     readonly List<Process> owned = [];
-    Process? opencode, ollama, inkling, blender;
+    WorkerJob? job;
+    volatile bool blocked;
+    readonly object launchGate = new();
+    Process? opencode, inkling, blender;
     HttpClient? api;
     public string Home { get; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Jarvis");
+    public static string BlenderExecutable => RuntimePath("JARVIS_BLENDER", @"C:\Program Files\Blender Foundation\Blender 5.2\blender.exe");
+    public static string SdkPython(string home) => Path.Combine(home, "sdk", "bpy-5.2.2", "Scripts", "python.exe");
     public string ScopeFile => Path.Combine(Home, "active-run.json");
     public string Project { get; set; }
+    public bool InklingConfigured =>
+        File.Exists(RuntimePath("JARVIS_INKLING_MODEL", @"D:\LocalAI\models\Inkling-2-Mini-UD-IQ4_XS.gguf")) &&
+        File.Exists(RuntimePath("JARVIS_INKLING_PROJECTOR", @"D:\LocalAI\models\mmproj-F16.gguf")) &&
+        File.Exists(RuntimePath("JARVIS_LLAMA_SERVER", @"D:\LocalAI\llama\llama-server.exe"));
+
     public int? BlenderPid => blender is { HasExited: false } ? blender.Id : null;
     public bool OwnsBlender => BlenderPid.HasValue;
 
@@ -29,17 +39,31 @@ sealed class Backend : IDisposable
         lock (owned) return owned.Where(process => !process.HasExited).Select(process => process.Id).ToArray();
     }
 
-    public bool StopExecution()
+    public void BlockLaunches() { lock (launchGate) blocked = true; }
+    public void ResumeLaunches() { lock (launchGate) blocked = false; }
+
+    public string[] StopExecution()
     {
-        try
+        lock (launchGate)
         {
-            if (opencode is not { HasExited: false } worker) return true;
-            worker.Kill(true);
-            return worker.WaitForExit(1500);
+            blocked = true;
+            if (job == null) return [];
+            var remaining = job.Terminate();
+            if (remaining.Length != 0) return remaining;
+            job.Dispose();
+            job = null;
+            return [];
         }
-        catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or AggregateException)
+    }
+
+    public (Process Process, Process Launcher) LaunchOwned(ProcessStartInfo info)
+    {
+        lock (launchGate)
         {
-            return opencode?.HasExited == true;
+            if (blocked) throw new OperationCanceledException("Jarvis is stopped.");
+            var result = (job ??= new WorkerJob()).Start(info);
+            lock (owned) { owned.Add(result.Process); owned.Add(result.Launcher); }
+            return result;
         }
     }
 
@@ -50,7 +74,22 @@ sealed class Backend : IDisposable
     public Backend() { Project = Path.Combine(Home, "Projects"); Directory.CreateDirectory(Project); }
     public string Location => "?location%5Bdirectory%5D=" + Uri.EscapeDataString(Project);
 
-    public async Task Connect()
+    public async Task Connect(OllamaModel? model = null)
+    {
+        await connectGate.WaitAsync();
+        try
+        {
+            if (model != null && (!registeredModels.TryGetValue(model.InferenceTag, out var previous) || previous != model))
+            {
+                await StopOpenCodeForModelChange();
+                registeredModels[model.InferenceTag] = model;
+            }
+            await ConnectCore();
+        }
+        finally { connectGate.Release(); }
+    }
+
+    async Task ConnectCore()
     {
         if (api != null && opencode is { HasExited: false }) return;
         File.Delete(ScopeFile);
@@ -58,8 +97,14 @@ sealed class Backend : IDisposable
         Directory.CreateDirectory(config);
         using var source = Assembly.GetExecutingAssembly().GetManifestResourceStream("Jarvis.opencode.json")!;
         var settings = JsonNode.Parse(source)!;
+        var models = settings["providers"]!["ollama"]!["models"]!.AsObject();
+        foreach (var model in registeredModels.Values) models[model.InferenceTag] = ModelConfig(model);
         settings["mcp"]!["servers"]!["blender"]!["command"]!.AsArray()[7] = Path.Combine(AppContext.BaseDirectory, "blender_mcp_offline.py");
         settings["mcp"]!["servers"]!["windows_mcp"]!["command"]!.AsArray()[7] = Path.Combine(AppContext.BaseDirectory, "desktop_mcp.py");
+        settings["mcp"]!["servers"]!["build"]!["command"]!.AsArray()[7] = Path.Combine(AppContext.BaseDirectory, "build_mcp.py");
+        if (Environment.GetEnvironmentVariable("JARVIS_UVX") is { Length: > 0 } uvx)
+            foreach (string connector in new[] { "blender", "windows_mcp", "build" })
+                settings["mcp"]!["servers"]![connector]!["command"]!.AsArray()[0] = uvx;
         File.WriteAllText(Path.Combine(config, "opencode.json"), settings.ToJsonString());
         var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
@@ -90,23 +135,17 @@ sealed class Backend : IDisposable
         throw new InvalidOperationException("OpenCode did not start. See Jarvis's local OpenCode log.");
     }
 
-    public async Task Model(bool useInkling, CancellationToken cancel)
+    public async Task PrepareModel(bool useInkling, CancellationToken cancel)
     {
         if (useInkling)
         {
             if (!await Alive("http://127.0.0.1:8080/health"))
             {
-                if (ollama is { HasExited: false }) { ollama.Kill(true); await ollama.WaitForExitAsync(cancel); }
-                else if (await Alive("http://127.0.0.1:11434/api/version"))
+                if (await Alive(Ollama + "/api/version"))
                 {
-                    var state = JsonNode.Parse(await local.GetStringAsync("http://127.0.0.1:11434/api/ps", cancel));
-                    foreach (var model in Array(state?["models"]))
-                    {
-                        if (S(model?["name"]) != "qwen3.5-pilot:4b")
-                            throw new InvalidOperationException("Unload the other running Ollama model before starting Inkling.");
-                    }
-                    await local.PostAsJsonAsync("http://127.0.0.1:11434/api/generate",
-                        new { model = "qwen3.5-pilot:4b", keep_alive = 0 }, cancel);
+                    var state = await OllamaJson("/api/ps", cancel);
+                    if (Array(state?["models"]).Any())
+                        throw new InvalidOperationException("Unload running Ollama models before starting Inkling.");
                 }
                 if (inkling is null || inkling.HasExited)
                 {
@@ -127,16 +166,6 @@ sealed class Backend : IDisposable
         if (inkling is { HasExited: false }) { inkling.Kill(true); await inkling.WaitForExitAsync(cancel); }
         else if (await Alive("http://127.0.0.1:8080/health"))
             throw new InvalidOperationException("Stop the external Inkling server before using Qwen.");
-        if (!await Alive("http://127.0.0.1:11434/api/version"))
-        {
-            if (ollama is null || ollama.HasExited)
-                ollama = Start(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    @"Programs\Ollama\ollama.exe"), ["serve"], new() { ["OLLAMA_NO_CLOUD"]="1", ["OLLAMA_HOST"]="127.0.0.1:11434" });
-            await Wait("http://127.0.0.1:11434/api/version", ollama, cancel);
-        }
-        var models = JsonNode.Parse(await local.GetStringAsync("http://127.0.0.1:11434/api/tags", cancel));
-        if (!Array(models?["models"]).Any(m => S(m?["name"]) == "qwen3.5-pilot:4b"))
-            throw new InvalidOperationException("The local qwen3.5-pilot:4b tag is missing. Run Setup-Jarvis.ps1.");
     }
 
     public async Task Blender(CancellationToken cancel)
@@ -147,7 +176,7 @@ sealed class Backend : IDisposable
         if (!File.Exists(Path.Combine(root, "runtime", "blender-scripts", "addons", "blender_mcp.py")) || !File.Exists(script))
             throw new FileNotFoundException("Jarvis's Blender add-on is missing. Run Setup-Jarvis.ps1.");
         if (blender is null || blender.HasExited)
-            blender = Start(RuntimePath("JARVIS_BLENDER", @"C:\Program Files\Blender Foundation\Blender 5.2\blender.exe"),
+            blender = Start(BlenderExecutable,
                 ["--factory-startup","--offline-mode","--python",script], new() { ["DISABLE_TELEMETRY"]="true", ["PYTHONUNBUFFERED"]="1" }, visible:true);
         for (int i = 0; i < 60 && !blender.HasExited; i++)
         {
@@ -188,22 +217,35 @@ sealed class Backend : IDisposable
             RedirectStandardError = true, RedirectStandardOutput = true };
         foreach (string argument in arguments) info.ArgumentList.Add(argument);
         if (environment != null) foreach (var item in environment) info.Environment[item.Key] = item.Value;
-        var process = Process.Start(info) ?? throw new InvalidOperationException("Could not start " + executable);
-        lock (owned) owned.Add(process);
+        var (process, launcher) = LaunchOwned(info);
         {
             var log = Path.Combine(Home, Path.GetFileNameWithoutExtension(executable) + ".log");
             void Log(string? line) {
                 if (line == null || line.Contains("server password", StringComparison.OrdinalIgnoreCase)) return;
-                lock (owned) try { File.AppendAllText(log, line + Environment.NewLine); } catch (IOException) { }
+                lock (owned)
+                    try
+                    {
+                        if (File.Exists(log) && new FileInfo(log).Length >= 2 * 1024 * 1024)
+                            File.Move(log, log + ".1", true);
+                        File.AppendAllText(log, RunJournal.Excerpt(line) + Environment.NewLine);
+                    }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
             }
-            process.OutputDataReceived += (_, e) => Log(e.Data);
-            process.ErrorDataReceived += (_, e) => Log(e.Data);
-            process.BeginOutputReadLine(); process.BeginErrorReadLine();
+            _ = Pump(launcher.StandardOutput);
+            _ = Pump(launcher.StandardError);
+            async Task Pump(StreamReader stream)
+            {
+                try { while (await stream.ReadLineAsync().ConfigureAwait(false) is { } line) Log(line); }
+                catch (IOException) { }
+                catch (ObjectDisposedException) { }
+            }
         }
         return process;
     }
     public async Task<JsonNode?> Call(string path, object? body = null, CancellationToken cancel = default)
     {
+        if (blocked) throw new OperationCanceledException("Jarvis is stopped.");
         if (api is null) throw new InvalidOperationException("OpenCode is disconnected.");
         using var response = body == null ? await api.GetAsync(path,cancel).ConfigureAwait(false) : await api.PostAsJsonAsync(path,body,cancel).ConfigureAwait(false);
         var value = await response.Content.ReadAsStringAsync(cancel).ConfigureAwait(false);
@@ -221,7 +263,8 @@ sealed class Backend : IDisposable
                 using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
                 file.Seek(Math.Max(0, file.Length - 5000), SeekOrigin.Begin);
                 using var reader = new StreamReader(file);
-                output.AppendLine($"── {name} ──").AppendLine(reader.ReadToEnd());
+                output.AppendLine($"── {name} ──");
+                while (reader.ReadLine() is { } line) output.AppendLine(RunJournal.Excerpt(line));
             }
             catch (IOException) { }
         }
@@ -233,10 +276,10 @@ sealed class Backend : IDisposable
         var info = new ProcessStartInfo("git.exe") { WorkingDirectory = Project, UseShellExecute = false,
             CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (var arg in new[] {"--no-pager", "diff", "--no-ext-diff", "--no-textconv", "HEAD", "--"}) info.ArgumentList.Add(arg);
-        using var process = Process.Start(info) ?? throw new InvalidOperationException("Git is unavailable.");
-        var output = process.StandardOutput.ReadToEndAsync();
-        var error = process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
+        var (process, launcher) = LaunchOwned(info);
+        var output = launcher.StandardOutput.ReadToEndAsync();
+        var error = launcher.StandardError.ReadToEndAsync();
+        await launcher.WaitForExitAsync();
         if (process.ExitCode != 0) throw new InvalidOperationException(await error);
         return await output;
     }
@@ -244,6 +287,7 @@ sealed class Backend : IDisposable
     public static string S(JsonNode? node) => node is JsonValue v && v.TryGetValue<string>(out var s) ? s : "";
     public void Dispose()
     {
+        job?.Dispose();
         foreach (var item in Enumerable.Reverse(owned))
         {
             try
