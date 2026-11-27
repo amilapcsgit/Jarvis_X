@@ -2,15 +2,21 @@
 
 **A local AI workspace for Windows x64.** Start with bundled Gemma chat and searchable Jarvis Help. Add local task models when you want to build projects, model in Blender, or operate a selected Windows app.
 
-[Download the Windows installer](https://github.com/amilapcsgit/Jarvis_X/releases/latest) · [License](LICENSE) · [Bundled model notices](builtin/MODELS.md)
+[Windows releases](https://github.com/amilapcsgit/Jarvis_X/releases/latest) · [License](LICENSE) · [Bundled model notices](builtin/MODELS.md)
 
-![A two-story house rendered locally in Blender](docs/house-render.png)
+## Inside Jarvis
 
-*Example Blender output. The editable scene uses procedural materials.*
+![Jarvis Reactor workspace showing a built-in chat and an expanded Blender setup source card](docs/screenshots/built-in-chat.png)
+
+*Built-in Chat with an expanded Jarvis Help source. The screenshot uses a demo conversation.*
+
+![Jarvis Runtime Settings showing dependency paths and Ollama and ComfyUI controls](docs/screenshots/settings.png)
+
+*Runtime Settings with example paths for Ollama, Blender, and optional connectors.*
 
 ## Install and start chatting
 
-1. Download **Jarvis_X_Setup.exe** and its checksum from Releases.
+1. Choose a release whose notes list **Built-in Gemma** and the **Nullsoft installer**. Download **Jarvis_X_Setup.exe** and its checksum from that release. The earlier v1.0.0 installer predates this setup.
 2. Run the Nullsoft wizard. Choose an installation folder and whether to create a desktop shortcut.
 3. Open **Jarvis_X**, choose **Chat**, and ask *How do I set up Blender?* Expand the source card to read the matching passage.
 
@@ -28,6 +34,12 @@ Open **Settings** to inspect or change dependency paths. The setup wizard report
 | Plan / Build | Select a project and inspect its changes or run its build and tests through OpenCode. |
 
 In **Models**, use **Open Ollama Desktop**, then **Refresh**. In chat, commands such as **list models** and **select model qwen3.5:4b** provide another route to the same controls. Jarvis requests confirmation before model selection or download from chat.
+
+### Example Blender output
+
+![A two-story house rendered locally in Blender](docs/house-render.png)
+
+*Example scene with editable geometry and procedural materials.*
 
 ## Approvals and troubleshooting
 
