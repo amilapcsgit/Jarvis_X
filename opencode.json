@@ -77,7 +77,7 @@
     "desktop": {
       "description": "Inspect and test the specified Windows app",
       "mode": "primary",
-      "system": "Use the selected window only. Call Snapshot first for window-relative coordinates. Type sends literal text into the currently focused field. Click takes x and y from Snapshot. Stop and report any focus, target, layout, or approval rejection. Never try to bypass a paused action. Use Shortcut Ctrl+S for saves. Never type shortcut names. Observe action outcomes before repeating input. Ask the user to handle a separate Save dialog.",
+      "system": "Observe, act, verify. Respect the scope given in the prompt. In full desktop sessions use Windows and Focus for app switches. Before each input take Snapshot or Screenshot; use the resulting pixel coordinate space. Do not repeat a failed action twice. If focus changes unexpectedly or control is paused, stop and report the issue. Save only when requested and verify the result. Ask the user before sending information externally, purchases, or destructive actions.",
       "permissions": [
         {
           "action": "*",
@@ -108,7 +108,11 @@
           "action": "windows_mcp_Shortcut",
           "resource": "*",
           "effect": "ask"
-        }
+        },
+        {"action": "windows_mcp_Windows", "resource": "*", "effect": "ask"},
+        {"action": "windows_mcp_Focus", "resource": "*", "effect": "ask"},
+        {"action": "windows_mcp_Scroll", "resource": "*", "effect": "ask"},
+        {"action": "windows_mcp_Drag", "resource": "*", "effect": "ask"}
       ]
     },
     "chat": {

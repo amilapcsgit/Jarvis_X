@@ -16,6 +16,7 @@ user = c.WinDLL("user32", use_last_error=True)
 kernel = c.WinDLL("kernel32", use_last_error=True)
 user.SetProcessDpiAwarenessContext(c.c_void_p(-4))
 user.GetForegroundWindow.restype = w.HWND
+user.GetWindowTextW.argtypes = [w.HWND, w.LPWSTR, c.c_int]
 user.GetWindowThreadProcessId.argtypes = [w.HWND, c.POINTER(w.DWORD)]
 user.GetWindowRect.argtypes = [w.HWND, c.POINTER(w.RECT)]
 user.WindowFromPoint.argtypes = [w.POINT]
@@ -30,31 +31,53 @@ kernel.CloseHandle.argtypes = [w.HANDLE]
 scope_path = Path(os.environ["JARVIS_RUN_SCOPE"])
 mcp = FastMCP("Jarvis Windows-MCP")
 observation = None
+image_size = None
+budget_run = None
+actions = 0
 
 
-def target(previous=None):
+def read_scope():
     try:
-        with scope_path.open(encoding="utf-8") as scope_file:
-            scope = json.load(scope_file)
+        scope = json.loads(scope_path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as error:
         raise RuntimeError("Desktop control released. Start a new run.") from error
-    selected = scope.get("Target")
-    if scope.get("Agent") != "desktop" or not selected:
-        raise RuntimeError("Choose a desktop window before starting.")
-    hwnd = selected["Handle"]
+    if scope.get("Agent") != "desktop" or scope.get("Paused"):
+        raise RuntimeError("Desktop control is paused or unavailable.")
+    return scope
+
+
+def spend(scope):
+    global budget_run, actions
+    if budget_run != scope["Id"]:
+        budget_run, actions = scope["Id"], 0
+    if actions >= 24:
+        raise RuntimeError("Desktop action limit reached. Review the results before continuing.")
+    actions += 1
+
+
+def window_identity(hwnd):
     pid = w.DWORD()
     user.GetWindowThreadProcessId(hwnd, c.byref(pid))
-    handle = kernel.OpenProcess(0x1000, False, pid.value) if pid.value == selected["Pid"] else None
+    handle = kernel.OpenProcess(0x1000, False, pid.value)
     if not handle:
-        raise RuntimeError("Selected window closed. Refresh the window list.")
+        raise RuntimeError("Cannot verify the window process.")
     try:
         start, exit_time, system, cpu = (w.FILETIME() for _ in range(4))
         if not kernel.GetProcessTimes(handle, c.byref(start), c.byref(exit_time), c.byref(system), c.byref(cpu)):
-            raise RuntimeError("Cannot verify selected process identity.")
-        if (start.dwHighDateTime << 32 | start.dwLowDateTime) != selected["Created"]:
-            raise RuntimeError("Selected process changed. Select a window again.")
+            raise RuntimeError("Cannot verify the window process.")
+        return {"Handle": hwnd, "Pid": pid.value, "Created": (start.dwHighDateTime << 32) | start.dwLowDateTime}
     finally:
         kernel.CloseHandle(handle)
+
+
+def target(previous=None):
+    scope = read_scope()
+    selected = window_identity(user.GetForegroundWindow()) if scope.get("FullDesktop") else scope.get("Target")
+    if not selected or selected["Pid"] == scope.get("HostPid"):
+        raise RuntimeError("Focus an ordinary app in the desktop session.")
+    hwnd = selected["Handle"]
+    if window_identity(hwnd) != selected:
+        raise RuntimeError("The target process changed. Observe again.")
     if user.GetForegroundWindow() != hwnd:
         raise RuntimeError("Desktop paused. Focus the selected window and take a fresh snapshot. Windows may be locked.")
     rect = w.RECT()
@@ -69,7 +92,7 @@ def target(previous=None):
 @mcp.tool(name="Snapshot")
 def snapshot() -> dict:
     """Read the selected window's accessibility tree. Returns window-relative pixel coordinates."""
-    global observation
+    global observation, image_size
     stamp = target()
     _, _, hwnd, (left, top, right, bottom) = stamp
     controls = []
@@ -98,41 +121,53 @@ def snapshot() -> dict:
             except (OSError, AttributeError, RuntimeError):
                 continue
     target(stamp)
-    observation = stamp
-    return {"width": right - left, "height": bottom - top, "controls": controls}
+    observation, image_size = stamp, None
+    title = c.create_unicode_buffer(256)
+    user.GetWindowTextW(hwnd, title, len(title))
+    return {"window": title.value, "width": right - left, "height": bottom - top, "controls": controls}
 
 
 @mcp.tool(name="Screenshot")
 def screenshot() -> Image:
     """Capture the selected window only. Use Snapshot for window-relative click coordinates."""
-    global observation
+    global observation, image_size
     stamp = target()
     image = ImageGrab.grab(window=stamp[2])
     target(stamp)
     image.thumbnail((960, 720))
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
-    observation = stamp
+    observation, image_size = stamp, image.size
     return Image(data=buffer.getvalue(), format="png")
 
 
 def require_observation():
     if observation is None:
         raise RuntimeError("Take a fresh Snapshot or Screenshot before input.")
-    return target(observation)
+    stamp = target(observation)
+    spend(read_scope())
+    return stamp
+
+
+def point(stamp, x, y):
+    _, _, hwnd, (left, top, right, bottom) = stamp
+    width, height = image_size or (right - left, bottom - top)
+    if not (0 <= x < width and 0 <= y < height):
+        raise ValueError("Point is outside the latest observation.")
+    x = left + x * (right - left) // width
+    y = top + y * (bottom - top) // height
+    if user.GetAncestor(user.WindowFromPoint(w.POINT(x, y)), 2) != hwnd:
+        raise RuntimeError("The point is covered by another window.")
+    return x, y
 
 
 @mcp.tool(name="Click")
 def click(x: int, y: int) -> str:
-    """Click one window-relative point from Snapshot. Observe again before the next input."""
+    """Click once in the latest Snapshot or Screenshot pixel space."""
     global observation
     stamp = require_observation()
-    _, _, hwnd, (left, top, right, bottom) = stamp
-    if not (0 <= x < right - left and 0 <= y < bottom - top):
-        raise ValueError("Click is outside the selected window.")
-    x, y = left + x, top + y
-    if user.GetAncestor(user.WindowFromPoint(w.POINT(x, y)), 2) != hwnd:
-        raise RuntimeError("The point is covered by another window.")
+    hwnd = stamp[2]
+    x, y = point(stamp, x, y)
     user.SetCursorPos(x, y)
     target(stamp)
     if user.GetAncestor(user.WindowFromPoint(w.POINT(x, y)), 2) != hwnd:
@@ -197,7 +232,7 @@ def shortcut(keys: str) -> str:
     """Use Ctrl+S, Ctrl+A, Ctrl+Z, Escape, Tab or Enter in the selected window."""
     global observation
     bindings = {"ctrl+s": (17, 83), "ctrl+a": (17, 65), "ctrl+z": (17, 90),
-                "escape": (27,), "tab": (9,), "enter": (13,)}
+                "ctrl+c": (17, 67), "ctrl+v": (17, 86), "escape": (27,), "tab": (9,), "enter": (13,)}
     chord = bindings.get(keys.lower().strip())
     if not chord:
         raise ValueError("Unsupported shortcut.")
@@ -209,5 +244,93 @@ def shortcut(keys: str) -> str:
     return "Shortcut sent. Observe the outcome before more input."
 
 
+@mcp.tool(name="Windows")
+def windows() -> list[dict]:
+    """List ordinary visible windows for Full desktop mode. Pass the returned identity to Focus."""
+    scope = read_scope()
+    if not scope.get("FullDesktop"):
+        raise RuntimeError("Window discovery requires Full desktop scope.")
+    found = []
+    callback_type = c.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
+    user.IsWindowVisible.argtypes = [w.HWND]
+    user.GetWindowTextW.argtypes = [w.HWND, w.LPWSTR, c.c_int]
+    user.EnumWindows.argtypes = [callback_type, w.LPARAM]
+
+    @callback_type
+    def collect(hwnd, _):
+        title = c.create_unicode_buffer(256)
+        if len(found) >= 32:
+            return False
+        if user.IsWindowVisible(hwnd) and user.GetWindowTextW(hwnd, title, len(title)):
+            try:
+                identity = window_identity(hwnd)
+                if identity["Pid"] != scope.get("HostPid"):
+                    found.append({"title": title.value, **identity})
+            except RuntimeError:
+                pass
+        return True
+
+    user.EnumWindows(collect, 0)
+    return found
+
+
+@mcp.tool(name="Focus")
+def focus(handle: int, pid: int, created: int) -> str:
+    """Switch to a visible window returned by Windows, then observe again."""
+    global observation
+    scope = read_scope()
+    identity = {"Handle": handle, "Pid": pid, "Created": created}
+    if not scope.get("FullDesktop") or not any(all(row[k] == v for k, v in identity.items()) for row in windows()):
+        raise RuntimeError("The window is outside the approved desktop scope.")
+    spend(scope)
+    observation = None
+    user.SetForegroundWindow.argtypes = [w.HWND]
+    if user.GetForegroundWindow() != handle and not user.SetForegroundWindow(handle):
+        raise RuntimeError("Windows declined to activate this app. Focus it manually.")
+    return "Window focus requested. Observe before input."
+
+
+@mcp.tool(name="Scroll")
+def scroll(x: int, y: int, steps: int) -> str:
+    """Scroll at a point in the latest capture. Positive steps scroll up."""
+    global observation
+    if not -8 <= steps <= 8 or steps == 0:
+        raise ValueError("Use 1–8 signed wheel steps.")
+    stamp = require_observation()
+    user.SetCursorPos(*point(stamp, x, y))
+    target(stamp)
+    observation = None
+    send((Input * 1)(Input(0, Payload(mouse=Mouse(0, 0, steps * 120, 0x800)))))
+    return "Scrolled. Observe the result."
+
+
+@mcp.tool(name="Drag")
+def drag(x: int, y: int, end_x: int, end_y: int) -> str:
+    """Drag between two unobstructed points in the observed window."""
+    global observation
+    stamp = require_observation()
+    start = point(stamp, x, y)
+    end = point(stamp, end_x, end_y)
+    user.SetCursorPos(*start)
+    target(stamp)
+    observation = None
+    left, top, width, height = (user.GetSystemMetrics(index) for index in (76, 77, 78, 79))
+    if width < 2 or height < 2:
+        raise RuntimeError("Cannot map virtual desktop coordinates.")
+    absolute_x = round((end[0] - left) * 65535 / (width - 1))
+    absolute_y = round((end[1] - top) * 65535 / (height - 1))
+    events = (Input * 3)(
+        Input(0, Payload(mouse=Mouse(0, 0, 0, 2))),
+        Input(0, Payload(mouse=Mouse(absolute_x, absolute_y, 0, 0xC001))),
+        Input(0, Payload(mouse=Mouse(0, 0, 0, 4))))
+    send(events)
+    return "Dragged. Observe the result."
+
+
 if __name__ == "__main__":
-    mcp.run()
+    import sys
+    if len(sys.argv) == 3 and sys.argv[1] == "--plan":
+        from desktop_planner import run
+        run(Path(sys.argv[2]))
+    else:
+        mcp.run()

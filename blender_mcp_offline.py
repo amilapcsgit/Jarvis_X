@@ -137,6 +137,7 @@ else:
         size: tuple[float, float, float] = (1, 1, 1)
         rotation: tuple[float, float, float] = (0, 0, 0)
         color: tuple[float, float, float] = (.55, .6, .65)
+        bevel: float = Field(default=0, ge=0, le=5)
         vertices: list[tuple[float, float, float]] = Field(default_factory=list, max_length=300)
         faces: list[list[int]] = Field(default_factory=list, max_length=300)
 
@@ -225,8 +226,10 @@ except Exception as error:
         global inspect_before_edit, uncertain_run
         code = """import bpy, json
 rows = []
-for ob in list(bpy.context.scene.objects)[:40]:
+for ob in sorted(bpy.context.scene.objects, key=lambda item: not bool(item.get("jarvis_part")))[:40]:
     row = {"name": ob.name, "type": ob.type, "location": list(ob.location), "rotation": list(ob.rotation_euler), "size": [round(v, 3) for v in ob.dimensions]}
+    if ob.get("jarvis_part"):
+        row.update(part=ob["jarvis_part"], shape=ob.get("jarvis_shape"), bevel=bool(ob.modifiers.get("Jarvis Bevel")))
     if ob.type == "MESH":
         row.update(vertices=len(ob.data.vertices), materials=[m.name for m in ob.data.materials if m][:8])
     rows.append(row)
@@ -294,6 +297,7 @@ print(json.dumps({"version": bpy.app.version_string, "scene": bpy.context.scene.
         request = json.loads(Path(sys.argv[-1]).read_text(encoding="utf-8-sig"))
         if active_scope()["Id"] != request["run"]:
             raise RuntimeError("Expired Blender run.")
-        run(request, get_scene_info, execute_blender_code, look, save_project)
+        run(request, get_scene_info, execute_blender_code, look, save_project,
+            lambda collection, parts: put_parts(collection, [Part.model_validate(part) for part in parts]))
     else:
         bridge.run()

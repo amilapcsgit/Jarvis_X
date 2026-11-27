@@ -10,6 +10,7 @@ SetCompressor zlib
 !define MUI_ABORTWARNING
 !define MUI_FINISHPAGE_RUN "$INSTDIR\Jarvis.exe"
 !insertmacro MUI_PAGE_WELCOME
+!insertmacro MUI_PAGE_LICENSE "${PAYLOAD}\licenses\Gemma-Terms.md"
 !insertmacro MUI_PAGE_DIRECTORY
 Page custom DependencyPage
 !insertmacro MUI_PAGE_COMPONENTS

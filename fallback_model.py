@@ -6,15 +6,30 @@ import re
 import urllib.request
 
 
-def run(request, inspect, edit, capture, save):
+def run(request, inspect, edit, capture, save, put_parts=None):
+    structured = request.get("structured", False)
     def emit(kind, value):
         print(json.dumps({"kind": kind, "value": value}), flush=True)
 
-    def ask(prompt, images):
+    def ask(prompt, images, json_output=False):
         message = {"role": "user", "content": prompt}
         if images:
             message["images"] = images
         body = {"model": request["model"], "stream": False, "messages": [message]}
+        if structured:
+            body["think"] = False
+            body["options"] = {"num_predict": 1200}
+        if json_output:
+            xyz = {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}
+            properties = {name: xyz for name in ("location", "size", "rotation", "color")}
+            properties.update(name={"type": "string"}, shape={"enum": ["box", "cylinder", "wedge", "mesh"]},
+                              bevel={"type": "number"}, vertices={"type": "array", "items": xyz},
+                              faces={"type": "array", "items": {"type": "array", "items": {"type": "integer"}}})
+            body["format"] = {"type": "object", "required": ["parts"], "properties": {
+                "question": {"type": "string"}, "save_name": {"type": "string"},
+                "parts": {"type": "array", "maxItems": 24, "items": {"type": "object",
+                    "required": ["name", "shape", "location", "size", "color"], "properties": properties}}
+            }}
         url = "http://127.0.0.1:11434/api/chat"
         if request["inkling"]:
             url = "http://127.0.0.1:8080/v1/chat/completions"
@@ -37,20 +52,52 @@ def run(request, inspect, edit, capture, save):
     instructions = ("Create or refine editable geometry in visible Blender. Preserve unrelated objects. "
                     "Return exactly one fenced python block, or QUESTION followed by a necessary design question. "
                     "Use stable object names. Prefer bpy.data.meshes.new and mesh.from_pydata for custom geometry. For simple primitives use primitive_cube_add(size=1) or primitive_cone_add(vertices=16, radius1=1, radius2=0, depth=2), then read bpy.context.object and set its dimensions. Jarvis handles saves and captures. Never save or clear the scene.\n")
+    shape_constraint = re.search(r"\b(?:from|out of)\s+(?:exactly\s+)?(?:[1-9]|one|two|three|four|five|six)\s+(cylinders|boxes|wedges)\b", brief, re.I) if structured else None
+    required_shape = {"cylinders": "cylinder", "boxes": "box", "wedges": "wedge"}[shape_constraint[1].lower()] if shape_constraint else None
+    if structured:
+        instructions = ("Create or refine a Blender asset with editable parts. Return JSON containing either question "
+                        "or a parts array. For a design question use an empty parts array and a question. Each part has name, shape (box, cylinder, wedge, or mesh), location, size, "
+                        "rotation in degrees, color RGB 0 to 1, optional bevel, and vertices/faces for mesh. "
+                        "Use stable names from the previous exchange. Include save_name only when the user requests a save. ")
+    if required_shape:
+        instructions += f"Every requested part must use shape {required_shape}. "
     repaired = False
     for attempt in range(3):
-        answer = ask(instructions + context, images)
-        if answer.startswith("QUESTION ") or (answer.endswith("?") and "```" not in answer):
-            emit("question", answer.removeprefix("QUESTION "))
-            return
-        blocks = re.findall(r"```(?:python|py)[ \t]*\r?\n(.+?)\r?\n```", answer, re.S | re.I)
-        if len(blocks) != 1 or answer.count("```") != 2:
-            raise ValueError("Expected one fenced Python script or a design question. No code dispatched.")
-        script = blocks[0]
-        emit("script", script)
+        answer = ask(instructions + context, images, structured)
         before = inspect()
+        script = answer
+        save_name = "Jarvis Model"
         try:
-            edit(script)
+            if structured:
+                proposal = json.loads(answer)
+                if not isinstance(proposal, dict):
+                    raise ValueError("Expected a JSON object.")
+                if isinstance(proposal.get("question"), str) and proposal["question"].strip():
+                    emit("question", proposal["question"])
+                    return
+                parts = proposal.get("parts")
+                if not isinstance(parts, list) or not parts:
+                    raise ValueError("Provide at least one editable part.")
+                if required_shape and any(not isinstance(part, dict) or part.get("shape") != required_shape for part in parts):
+                    raise ValueError(f"Every part must be a {required_shape}, as requested.")
+                wants_save = re.search(r"\b(?:save|export)\b|\.blend\b", brief, re.I)
+                save_name = (proposal.get("save_name") or "Jarvis Model") if wants_save else None
+                if isinstance(save_name, str):
+                    save_name = re.sub(r"\.blend$", "", save_name.strip(), flags=re.I)
+                if save_name is not None and (not isinstance(save_name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 _-]{0,70}", save_name)):
+                    raise ValueError("Choose a simple file name.")
+                emit("script", script)
+                put_parts("Jarvis " + request.get("collection", "Model"), parts)
+            else:
+                if answer.startswith("QUESTION ") or (answer.endswith("?") and "```" not in answer):
+                    emit("question", answer.removeprefix("QUESTION "))
+                    return
+                blocks = re.findall(r"```(?:python|py)[ \t]*\r?\n(.+?)\r?\n```", answer, re.S | re.I)
+                if len(blocks) != 1 or answer.count("```") != 2:
+                    raise ValueError("Expected one fenced Python script or a design question. No code dispatched.")
+                script = blocks[0]
+                emit("script", script)
+                edit(script)
         except Exception as error:
             current = inspect()
             if any(word in str(error).lower() for word in ("timeout", "timed out", "connection", "no response")):
@@ -77,8 +124,9 @@ def run(request, inspect, edit, capture, save):
         verdict = ask(f"{context}\nBefore: {before}\nAfter: {after}\nCompare the requested result with the evidence. "
                       "Reply DONE followed by the verified changes, or REFINE followed by the missing change.", images)
         if verdict.startswith("DONE") and initial != after:
-            result = save("Jarvis Model")
-            emit("done", verdict + "\n" + result["output"])
+            if save_name:
+                verdict += "\n" + save(save_name)["output"]
+            emit("done", (verdict.removeprefix("DONE").strip() or "Blender scene updated."))
             return
         context += f"\nCurrent scene: {after}\nRequired refinement: {verdict}"
     raise RuntimeError("Could not verify the requested change within the edit limit.")

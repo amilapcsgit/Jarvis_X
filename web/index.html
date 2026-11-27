@@ -11,7 +11,6 @@
   <script defer src="jarvis.js"></script>
 </head>
 <body>
-  <canvas id="ambient-canvas" hidden aria-hidden="true"></canvas>
   <div class="layout">
     <aside class="rail" aria-label="Project and conversations">
       <div class="rail-label"><span class="brand-core"></span><div><small>WORKSPACE</small><strong id="project-name">Local project</strong></div></div>
@@ -24,7 +23,7 @@
     </aside>
     <main id="main" class="work">
       <header class="work-top">
-        <div><small>LOCAL AGENT</small><h1>Workspace</h1></div>
+        <div><h1>Command Center</h1></div>
         <div class="toolbar">
           <label class="sr" for="mode">Agent mode</label><select id="mode" data-select="mode"><option value="chat">Chat</option><option value="plan">Plan</option><option value="build">Build</option><option value="blender">Blender</option><option value="desktop">Desktop</option></select>
           <button id="models-toggle" aria-controls="models-panel" aria-expanded="false">Models</button>
@@ -49,19 +48,26 @@
         <p id="model-progress" role="status"></p><p id="model-error" role="alert"></p>
       </section>
       <section id="desktop-controls" class="panel desktop-controls" hidden>
-        <div class="desktop-row"><button id="windows-toggle" aria-controls="windows-popup" aria-expanded="false">Choose a window ▾</button><button data-command="focus" id="focus">Focus target</button><button data-command="windows">Refresh windows</button></div>
+        <div class="desktop-row"><label for="desktop-scope">Control scope</label><select id="desktop-scope" data-select="desktop-scope"><option value="full">Full desktop session</option><option value="single">Single window</option></select><button id="desktop-control" data-command="desktop-take-control" hidden>Take control</button></div>
+        <div id="single-window-controls" class="desktop-row"><button id="windows-toggle" aria-controls="windows-popup" aria-expanded="false">Choose a window ▾</button><button data-command="focus" id="focus">Focus target</button><button data-command="windows">Refresh windows</button></div>
         <div id="windows-popup" hidden><label class="sr" for="window-filter">Search windows</label><input id="window-filter" type="search" placeholder="Search by title or process"><div id="windows"></div></div>
         <details><summary>Launch an app</summary><div class="desktop-row">
           <button data-command="launch" data-value="notepad">Notepad</button><button data-command="launch" data-value="calculator">Calculator</button><button data-command="launch" data-value="blender">Blender</button><button data-command="launch" data-value="pick">Choose .exe</button>
         </div></details>
       </section>
-                <div id="overview" class="panel reactor"><div class="panel-label"><span>REACTOR CORE</span><span class="core-mode">STATIC</span></div>
-            <div id="core-stage" class="core-stage"><img class="halo" src="assets/hud/reactor-halo.png" alt=""></div>
-            <div class="core-readout"><strong id="core-state">Starting</strong><span id="core-reading">Local model</span></div><button id="motion" aria-pressed="false">Animate reactor</button></div>
+      <div class="chat-surface" id="overview">
+        <canvas id="ambient-canvas" hidden aria-hidden="true"></canvas>
+        <div id="core-stage" class="core-stage" aria-hidden="true"><img class="halo" src="assets/hud/reactor-halo.png" alt=""></div>
+        <div class="command-readout"><strong id="core-state" role="status">Starting</strong><span id="core-reading">Jarvis Built-in</span><span id="core-step" hidden></span><button id="motion" aria-pressed="false">Animate reactor</button></div>
       <section class="conversation panel" id="conversation" aria-label="Conversation">
         <div id="welcome">
-          <div class="hud-icon icon-3" aria-hidden="true"></div>
+
           <h2 id="welcome-title">What are we working on?</h2><p id="welcome-copy">Send a message or attach an image to get started.</p>
+          <div class="quick-start" aria-label="Prepare a request">
+            <button data-start="chat">Chat <small>Ask how to set up Blender</small></button>
+            <button data-start="desktop">Use my desktop <small>Read text in an open app</small></button>
+            <button data-start="blender">Model in Blender <small>Build an editable desk lamp</small></button>
+          </div>
           <button id="suggestion" hidden></button>
         </div>
         <div id="messages" role="log" aria-live="off"></div>
@@ -70,6 +76,7 @@
         <label class="sr" for="prompt">Message</label><textarea id="prompt" rows="3" placeholder="Message Jarvis…"></textarea>
         <div class="composer-actions"><button data-command="attach">Attach image</button><button id="attachment" data-command="detach" hidden></button><small class="key-hint">Ctrl + Enter</small><button class="primary" id="send" disabled>Send&nbsp; ↗</button></div>
       </section>
+      </div>
     </main>
     <aside class="drawer" id="drawer" aria-label="Activity, preview and diagnostics">
       <h2 class="section-title inspector-title">Operations</h2>

@@ -1,0 +1,5 @@
+Gemma is provided under and subject to the Gemma Terms of Use found at gemma.ai/resources/terms
+
+The use restrictions in section 3.2 of the bundled Gemma Terms of Use apply to the use and distribution of the bundled Gemma model.
+
+Gemma 3 270M IT was converted and quantized to GGUF Q4_K_M by its upstream converter. EmbeddingGemma 2 was distributed as a Q8_0 GGUF conversion. Jarvis_X redistributes those model files without further changes. See builtin/MODELS.md for provenance and hashes.

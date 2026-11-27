@@ -61,6 +61,15 @@ for part in parts:
         if old_mesh and old_mesh.users == 0:
             bpy.data.meshes.remove(old_mesh)
         obj = old
+    obj["jarvis_shape"] = part["shape"]
     obj.location = part["location"]
     obj.rotation_euler = tuple(math.radians(a) for a in part["rotation"])
+    bevel = obj.modifiers.get("Jarvis Bevel")
+    if part.get("bevel", 0) > 0:
+        if bevel is None:
+            bevel = obj.modifiers.new("Jarvis Bevel", "BEVEL")
+        bevel.width = part["bevel"]
+        bevel.segments = 3
+    elif bevel is not None:
+        obj.modifiers.remove(bevel)
 print(f"Applied {len(parts)} editable parts in {collection.name}.")

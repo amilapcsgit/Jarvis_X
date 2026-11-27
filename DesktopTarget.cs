@@ -112,21 +112,29 @@ sealed record DesktopTarget(long Handle, int Pid, long Created, string Process, 
     }
 }
 
-sealed class RunScope(string file, string project, DesktopTarget? target, string agent)
+sealed class RunScope(string file, string project, DesktopTarget? target, string agent, bool fullDesktop = false)
 {
     public string Id { get; } = Guid.NewGuid().ToString("N");
     public string Project { get; } = Path.GetFullPath(project);
     public DesktopTarget? Target { get; } = target;
     public string Agent { get; } = agent;
     public int FocusVersion { get; private set; }
-    public string Destination => Target?.Label ?? Project;
+    public bool FullDesktop => fullDesktop;
+    public bool Paused { get; private set; }
+    public string Destination => FullDesktop ? "Full desktop session · ordinary windows and dialogs" : Target?.Label ?? Project;
+
+    public void Pause(bool pause)
+    {
+        Paused = pause;
+        InvalidateObservation();
+    }
 
     public void Publish()
     {
         var temporary = file + ".tmp";
         File.WriteAllText(temporary, JsonSerializer.Serialize(new
         {
-            Id, Project, Agent, FocusVersion, Target = Target == null ? null : new { Target.Handle, Target.Pid, Target.Created }
+            Id, Project, Agent, FocusVersion, FullDesktop, Paused, HostPid = Environment.ProcessId, Target = Target == null ? null : new { Target.Handle, Target.Pid, Target.Created }
         }));
         File.Move(temporary, file, true);
     }

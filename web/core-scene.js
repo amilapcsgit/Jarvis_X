@@ -280,13 +280,11 @@ if (canvas && stage) {
     function measure() {
       const r = stage.getBoundingClientRect();
       const area = overview?.getBoundingClientRect() ?? r;
-      stageCenterX = r.left + r.width / 2;
-      stageCenterY = r.top + r.height / 2;
+      stageCenterX = r.left - area.left + r.width / 2;
+      stageCenterY = r.top - area.top + r.height * .44;
       // Keep the full orbital envelope + glow inside a ten-percent mobile gutter.
       radiusPixels = mobile ? Math.min(93, width * .245, r.height * .32) : Math.min(180, r.height * .35);
-      const fadeTop = Math.min(1, Math.max(0, (area.bottom - 30) / Math.max(100, height * .22)));
-      const fadeBottom = Math.min(1, Math.max(0, (height - area.top) / Math.max(100, height * .2)));
-      coreFade = fadeTop * fadeBottom;
+      coreFade = 1;
       atom.visible = coreFade > .005;
       scrollTarget = Math.min(scrollY / Math.max(height, 1), 8);
       orbitFitDirty = true;
@@ -385,8 +383,11 @@ if (canvas && stage) {
       if (legacyCanvas) { legacyCanvas.dataset.frames = String(drawnFrames); legacyCanvas.dataset.engine = 'threejs-shared'; legacyCanvas.dataset.motion = canvas.dataset.motion; }
     }
     function size() {
-      width = document.documentElement.clientWidth || innerWidth; height = Math.max(1, innerHeight); mobile = width <= 700;
-      renderer.setPixelRatio(Math.min(devicePixelRatio, mobile ? 1 : 1.25));
+      const bounds = stage.getBoundingClientRect();
+      width = Math.max(1, Math.round(bounds.width));
+      height = Math.max(1, Math.round(bounds.height));
+      mobile = width <= 700;
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 1));
       renderer.setSize(width, height, false);
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
@@ -402,12 +403,10 @@ if (canvas && stage) {
     function frame(now) {
       raf = null;
       if (!allowed()) return;
-      const interval = 1000 / (mobile ? 30 : 45);
+      const interval = 1000 / 30;
       if (now - lastPaint >= interval) {
         const delta = Math.min((now - lastRendered) / 1000, .08);
         lastRendered = now;
-        // Preserve the remainder so a 45fps target can use three of every four
-        // 60Hz callbacks instead of rounding down to a rigid 30fps cadence.
         lastPaint = now - ((now - lastPaint) % interval);
         elapsed += delta;
         pose(delta);
@@ -428,13 +427,13 @@ if (canvas && stage) {
     const markLayout = () => { layoutDirty = true; requestStill(); };
     window.addEventListener('resize', size, { passive: true });
     window.addEventListener('scroll', markLayout, { passive: true });
-    const resizeObserver = new ResizeObserver(markLayout);
+    const resizeObserver = new ResizeObserver(size);
     resizeObserver.observe(stage);
     if (overview) resizeObserver.observe(overview);
     window.addEventListener('pointermove', e => {
       if (!finePointer.matches || !motionEnabled()) return;
-      pointerX = e.clientX / width - .5;
-      pointerY = e.clientY / height - .5;
+      pointerX = (e.clientX - stage.getBoundingClientRect().left) / width - .5;
+      pointerY = (e.clientY - stage.getBoundingClientRect().top) / height - .5;
     }, { passive: true });
     document.addEventListener('pointerleave', () => { pointerX = pointerY = 0; });
     window.addEventListener('portfolio-motion', resume);

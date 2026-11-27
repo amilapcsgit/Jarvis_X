@@ -20,6 +20,7 @@ try {
     dotnet publish Jarvis.csproj --no-restore -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o $stage
     if ($LASTEXITCODE) { throw 'Jarvis publish failed.' }
     Copy-Item -LiteralPath 'Install-Missing-Dependencies.bat','LICENSE' -Destination $stage
+    Copy-Item -LiteralPath 'licenses' -Destination $stage -Recurse
     $output = Join-Path $out.FullName 'Jarvis_X_Setup.exe'
     & $Compiler "/DPAYLOAD=$stage" "/DOUTPUT=$output" 'installer/Jarvis.nsi'
     if ($LASTEXITCODE) { throw 'Nullsoft build failed.' }

@@ -1,56 +1,50 @@
+<p align="center"><img src="web/assets/hud/reactor-halo.png" height="112" alt="Jarvis Reactor"></p>
+
 # Jarvis_X
 
-**A local AI workspace for Windows x64.** Start with bundled Gemma chat and searchable Jarvis Help. Add local task models when you want to build projects, model in Blender, or operate a selected Windows app.
+**A local AI command center for Windows x64.** Chat with bundled Gemma, work across Windows apps with a local Ollama model, or build editable scenes in Blender.
 
-[Windows releases](https://github.com/amilapcsgit/Jarvis_X/releases/latest) · [License](LICENSE) · [Bundled model notices](builtin/MODELS.md)
+[**Download the Windows installer**](https://github.com/amilapcsgit/Jarvis_X/releases/latest/download/Jarvis_X_Setup.exe) · [Release notes and SHA-256](https://github.com/amilapcsgit/Jarvis_X/releases/latest) · [Get optional task dependencies](https://github.com/amilapcsgit/Jarvis_X/releases/latest/download/Install-Missing-Dependencies.bat)
 
-## Inside Jarvis
+![Jarvis_X Command Center with a cyan Reactor behind the workspace and shortcuts for Chat, Desktop and Blender](docs/screenshots/command-center.png)
 
-![Jarvis Reactor workspace showing a built-in chat and an expanded Blender setup source card](docs/screenshots/built-in-chat.png)
+*The Command Center keeps the Reactor, composer, and Operations in one workspace. Screenshots use a disposable demo project.*
 
-*Built-in Chat with an expanded Jarvis Help source. The screenshot uses a demo conversation.*
+## Choose a workflow
 
-![Jarvis Runtime Settings showing dependency paths and Ollama and ComfyUI controls](docs/screenshots/settings.png)
+| Mode | What you can do |
+| --- | --- |
+| **Chat** | Start with bundled Gemma, ask about Jarvis, or add text and Markdown files for local retrieval. |
+| **Desktop** | Choose **Full desktop session** for app switching or **Single window** for a narrower scope. Jarvis observes the current window before acting and records results in Operations. Vision models can use screenshots. |
+| **Blender** | Use **Auto** for structured editable parts, **Native tools** for direct Blender tools, or **Python fallback** when you need a script-based workflow. |
+| **Plan / Build** | Select a local project to inspect Git changes, run supported tests, and work through changes in OpenCode. |
 
-*Runtime Settings with example paths for Ollama, Blender, and optional connectors.*
+### Desktop control
+
+![Jarvis_X Desktop mode displaying the Full desktop session selector, a sample interaction, and the Operations panel](docs/screenshots/desktop.png)
+
+The Desktop planner uses the selected local Ollama model. **Take control** pauses input. **Emergency Stop** terminates Jarvis-owned workers and revokes approvals. The demo transcript illustrates the interface.
+
+### Editable Blender models
+
+![Jarvis_X Blender mode displaying a modeling request and a captured Blender viewport in Operations](docs/screenshots/blender.png)
+
+Ask for named parts, dimensions, and materials. Jarvis can update parts in a dedicated collection and verify a saved project-local `.blend` file. The screenshot includes a viewport captured during a local modeling check.
 
 ## Install and start chatting
 
-1. Choose a release whose notes list **Built-in Gemma** and the **Nullsoft installer**. Download **Jarvis_X_Setup.exe** and its checksum from that release. The earlier v1.0.0 installer predates this setup.
-2. Run the Nullsoft wizard. Choose an installation folder and whether to create a desktop shortcut.
-3. Open **Jarvis_X**, choose **Chat**, and ask *How do I set up Blender?* Expand the source card to read the matching passage.
+1. Download **Jarvis_X_Setup.exe** and the SHA-256 checksum from the GitHub release.
+2. Run the Nullsoft wizard and choose the installation folder.
+3. Open **Jarvis_X** and use the composer or pick a starter prompt. Built-in chat runs with the bundled CPU runtime and model weights.
+4. For task tools, open **Settings** or run **Install-Missing-Dependencies.bat**. The helper detects existing tools and prompts before installing missing packages. Choose your local task model in **Models**.
 
-Built-in chat uses the bundled CPU runtime and weights. **Settings → Add knowledge files** imports text and Markdown into the local knowledge library.
+[![Runtime Settings showing Ollama, Blender and optional connector paths](docs/screenshots/settings.png)](docs/screenshots/settings.png)
 
-## Add task tools
-
-Open **Settings** to inspect or change dependency paths. The setup wizard reports common installed tools. If you need additional dependencies, run **Install-Missing-Dependencies.bat** from the install folder or download it from the same release. The helper checks for working installations and prompts before installing packages. Its saved-path check uses Windows PowerShell to read JSON.
-
-| Mode | What to try |
-| --- | --- |
-| Chat | Ask about Jarvis or search imported text and Markdown. |
-| Blender | Select a local Ollama model and ask for an editable scene. Auto can start the Python fallback when the model lacks native tools. |
-| Desktop | Select a disposable window, approve the chat, and verify actions in that window. |
-| Plan / Build | Select a project and inspect its changes or run its build and tests through OpenCode. |
-
-In **Models**, use **Open Ollama Desktop**, then **Refresh**. In chat, commands such as **list models** and **select model qwen3.5:4b** provide another route to the same controls. Jarvis requests confirmation before model selection or download from chat.
-
-### Example Blender output
-
-![A two-story house rendered locally in Blender](docs/house-render.png)
-
-*Example scene with editable geometry and procedural materials.*
-
-## Approvals and troubleshooting
-
-- **Allow this chat** scopes approval to the current mode and project. Desktop also binds approval to the selected window.
-- **Emergency Stop** terminates Jarvis-owned workers and revokes approvals. Save work in Jarvis-started Blender before stopping when possible.
-- If models are missing, check Ollama startup and the selected model directory. A shared Ollama process uses its own settings.
-- For ComfyUI, use **Test ComfyUI** with an existing local or LAN endpoint. Pinokio-managed discovery and launch require a reachable Pinokio control plane.
+*Runtime Settings uses example paths. For ComfyUI, test an existing endpoint or use the Pinokio controls with a reachable Pinokio installation.*
 
 ## Build from source
 
-Use the .NET 10 SDK, Node.js, Python and NSIS on Windows x64. Run the pinned asset preparation and installer build in PowerShell.
+Use Windows x64, the .NET 10 SDK, Node.js, Python, and NSIS. For the full installer, fetch the pinned model and runtime assets first.
 
 ```powershell
 ./Get-ReleaseAssets.ps1
@@ -58,8 +52,8 @@ dotnet restore Jarvis.csproj -r win-x64
 ./Build-Nullsoft.ps1
 ```
 
-GitHub Actions validates Windows builds and prepares installer assets on version tags. Check the release notes for the smoke-test results.
+GitHub Actions validates the Windows build. Release notes describe the checks run for each installer.
 
 ## License
 
-Author **L.J. Amila Prasad Perera**. Jarvis-owned material is available for personal, non-commercial use under the [Jarvis_X license](LICENSE). Bundled models, runtimes, fonts and other dependencies retain their own terms. See [model notices](builtin/MODELS.md) and [web asset notices](web/licenses).
+Author **L.J. Amila Prasad Perera**. Jarvis-owned material is licensed for personal, non-commercial use. Bundled components retain their own terms. [Jarvis_X license](LICENSE) · [Model provenance](builtin/MODELS.md) · [Third-party notices](licenses)

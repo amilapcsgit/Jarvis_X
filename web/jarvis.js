@@ -52,12 +52,11 @@ function setTab(name) {
 }
 
 function applyMotion() {
-  const show = !minimized;
+  const show = !minimized && !document.hidden && !node("runtime-dialog").open;
   window.portfolioMotion = show && motionRequested && !document.hidden;
   canvas.classList.toggle('display-scene', show && motionRequested);
   core.classList.toggle('static', !window.portfolioMotion);
   if (window.portfolioMotion) {
-    clipCanvas();
     if (!sceneLoaded) {
       sceneLoaded = true;
       import('./core-scene.js').catch(() => {
@@ -70,18 +69,6 @@ function applyMotion() {
   window.dispatchEvent(new Event('portfolio-motion'));
 }
 
-function clipCanvas() {
-  const rect = core.getBoundingClientRect();
-  const inspector = core.closest('.work').getBoundingClientRect();
-  const top = Math.max(rect.top, inspector.top);
-  const bottom = Math.min(rect.bottom, inspector.bottom);
-  canvas.style.clipPath = bottom > top
-    ? `inset(${top}px ${innerWidth - rect.right}px ${innerHeight - bottom}px ${rect.left}px)`
-    : 'inset(100%)';
-}
-
-new ResizeObserver(clipCanvas).observe(core);
-node('drawer').querySelector('.inspector-scroll').addEventListener('scroll', clipCanvas, { passive: true });
 document.addEventListener('visibilitychange', applyMotion);
 
 function applyState(next) {
@@ -96,19 +83,35 @@ function applyState(next) {
   node('continue-blender').hidden = !next.canContinueBlender;
   node('continue-blender').disabled = next.busy;
   const status = next.status || '';
-  node('core-state').textContent = status.startsWith('Waiting for approval') ? 'Waiting for approval'
+  node('core-state').textContent = /^Waiting for (?:chat )?approval/.test(status) ? 'Waiting for approval'
     : /failed|unavailable/i.test(status) ? 'Failed'
+    : status.startsWith('Desktop paused') ? 'Paused'
+    : status.startsWith('Observing') ? 'Observing'
+    : status.startsWith('Acting') ? 'Acting'
+    : status.startsWith('Running · windows_mcp_') ? (/(Snapshot|Screenshot|Windows)$/.test(status) ? 'Observing' : 'Acting')
     : status.startsWith('Running · blender_') ? 'Running Blender'
     : status.startsWith('Completed ·') ? 'Completed'
     : next.busy ? (/^Connecting/.test(status) ? 'Connecting' : 'Thinking')
     : next.ready ? 'Ready' : 'Starting';
   node('status').textContent = next.status;
   node('status').title = next.status;
+  node('overview').dataset.phase = node('core-state').textContent;
+  node('core-state').title = status;
+  const step = node('core-step');
+  step.textContent = next.busy && status.includes(' · ') ? status.split(' · ').at(-1) : '';
+  step.hidden = !step.textContent;
   node('project').textContent = next.project;
   node('project-name').textContent = next.project.split(/[\\/]/).filter(Boolean).at(-1) || next.project;
   node('project-name').title = next.project;
   node('mode').value = next.agent;
   node('desktop-controls').hidden = next.agent !== 'desktop';
+  node('desktop-scope').value = next.fullDesktop ? 'full' : 'single';
+  node('desktop-scope').disabled = next.busy;
+  node('single-window-controls').hidden = next.fullDesktop;
+  const takeControl = node('desktop-control');
+  takeControl.hidden = !next.busy;
+  takeControl.dataset.command = next.desktopPaused ? 'desktop-resume' : 'desktop-take-control';
+  takeControl.textContent = next.desktopPaused ? 'Resume desktop' : 'Take control';
   node('focus').disabled = !next.target;
   node('attachment').hidden = !next.attachment;
   node('attachment').textContent = next.attachment ? next.attachment + ' ×' : '';
@@ -139,7 +142,7 @@ function applyState(next) {
 
 function updateSend() {
   node('send').disabled = !state.ready || state.busy || !prompt.value.trim()
-    || (state.agent === 'desktop' && !state.target);
+    || (state.agent === 'desktop' && !state.fullDesktop && !state.target);
 }
 
 function updateSelectedWindow() {
@@ -195,6 +198,7 @@ function updateRow(row) {
     cardRows.set(row.id, body);
     node('messages').append(card);
     node('welcome').hidden = true;
+    node('overview').classList.add('has-messages');
   }
   cardRows.get(row.id).textContent = row.body;
   if (follow) conversation.scrollTop = conversation.scrollHeight;
@@ -240,7 +244,7 @@ function showApproval(value) {
   note.hidden = !(chatGrant || covered);
   note.textContent = covered ? 'Refocus the selected window to resume under the existing approval.' : ({
     blender: 'Covers scene inspection, parts, Python, previews and managed saves. Python runs with your Windows account permissions.',
-    desktop: 'Covers observation and input for the selected window and process.',
+    desktop: state.fullDesktop ? 'Covers observation and input across ordinary windows and dialogs in this Windows session.' : 'Covers observation and input for the selected window and process.',
     build: 'Covers project edits, Git inspection and supported build, test, restore and run commands.',
   })[value?.group] || '';
   node('permission').hidden = !value;
@@ -301,20 +305,8 @@ function updateMetrics(value) {
   }
 }
 
-let readings = [];
-let readingIndex = 0;
-function showCoreReading() {
-  node('core-reading').textContent = readings[readingIndex] || 'Unavailable';
-}
-setInterval(() => {
-  if (minimized || document.hidden || !motionRequested) return;
-  readingIndex = (readingIndex + 1) % readings.length;
-  showCoreReading();
-}, 3000);
 function updateModel(value) {
-  readings = [value.model, number(value.output, ' output tokens', 0),
-    number(value.rate, ' tok/s'), 'First token · ' + number(value.ttft, ' ms', 0)];
-  showCoreReading();
+  node('core-reading').textContent = [value.model, value.rate == null ? '' : number(value.rate, ' tok/s')].filter(Boolean).join(' · ');
   stats('inference', [
     ['MODEL', value.model], ['FIRST TOKEN', number(value.ttft, ' ms', 0)],
     ['UNCACHED INPUT', number(value.input, '', 0)], ['OUTPUT TOKENS', number(value.output, '', 0)],
@@ -330,6 +322,7 @@ function reset() {
   node('timeline').replaceChildren();
   node('activity-empty').hidden = false;
   node('welcome').hidden = false;
+  node('overview').classList.remove('has-messages');
   node('capture').hidden = true;
   node('capture').removeAttribute('src');
   node('preview-empty').hidden = false;
@@ -517,4 +510,22 @@ function renderRuntimeSettings(settings) {
   }
   button('Close', () => dialog.close());
   if (!dialog.open) dialog.showModal();
+  applyMotion();
+}
+
+
+node('runtime-dialog').addEventListener('close', applyMotion);
+const firstPrompts = {
+  chat: 'How do I set up Blender in Jarvis?',
+  desktop: 'Inspect the open text editor and summarize the visible text.',
+  blender: 'Create an editable desk lamp with a circular base, stem, and shade. Use two materials and save it in this project.'
+};
+for (const button of document.querySelectorAll('[data-start]')) {
+  button.addEventListener('click', () => {
+    const mode = button.dataset.start;
+    send('mode', mode);
+    prompt.value = firstPrompts[mode];
+    updateSend();
+    prompt.focus();
+  });
 }

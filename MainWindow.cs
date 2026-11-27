@@ -183,7 +183,7 @@ public partial class MainWindow : Window
     void RevokeChatGrant()
     {
         if (session != null) grants.Remove(session);
-        if (fallbackActive) { scope?.Revoke(); run?.Cancel(); }
+        if (fallbackActive || scope?.Agent is "desktop" or "blender") { scope?.Revoke(); run?.Cancel(); }
     }
 
     static readonly HashSet<string> BlenderActions = new(StringComparer.Ordinal)
@@ -193,7 +193,8 @@ public partial class MainWindow : Window
     };
     static readonly HashSet<string> DesktopActions = new(StringComparer.Ordinal)
     {
-        "windows_mcp_Snapshot", "windows_mcp_Screenshot", "windows_mcp_Click", "windows_mcp_Type", "windows_mcp_Shortcut"
+        "windows_mcp_Snapshot", "windows_mcp_Screenshot", "windows_mcp_Click", "windows_mcp_Type", "windows_mcp_Shortcut",
+        "windows_mcp_Windows", "windows_mcp_Focus", "windows_mcp_Scroll", "windows_mcp_Drag"
     };
     static readonly HashSet<string> BaselineBuild = new(StringComparer.Ordinal)
     {
@@ -210,7 +211,8 @@ public partial class MainWindow : Window
     RunJournal Journal => journal ??= new(backend.Home);
     bool BuildGrant => Covers("build", backend.Project);
     bool BlenderGrant => Covers("blender", backend.Project);
-    bool DesktopGrant => selected is { } item && Covers("desktop", backend.Project, item.Id);
+    bool fullDesktop = true;
+    bool DesktopGrant => Covers("desktop", backend.Project, fullDesktop ? null : selected?.Id);
     void ClearGrants() => grants.Clear();
     const string BlenderPythonAction = "blender_execute_blender_code";
 
@@ -255,7 +257,7 @@ public partial class MainWindow : Window
     {
         ready, status, agent, inkling, blenderGrant = BlenderGrant, desktopGrant = DesktopGrant, buildGrant = BuildGrant, acceptCodex, canContinueBlender = lastBuildPrompt != null, busy = run != null || stopping || refreshingModels, deciding,
         project = backend.Project, session, attachment = attachment == null ? null : Path.GetFileName(attachment),
-        execution, target = selected?.Id, forceBlender = backend.OwnsBlender, console = diagnosticWindow != null
+        execution, fullDesktop, desktopPaused = scope?.Paused == true, target = selected?.Id, forceBlender = backend.OwnsBlender, console = diagnosticWindow != null
     });
 
     async Task AdmittedCommand(JsonNode? request)
@@ -283,6 +285,17 @@ public partial class MainWindow : Window
         }
         if (command is "model" or "models-refresh" or "model-pull" or "model-cancel")
         { await ModelCommand(command, value); return; }
+        if (command is "desktop-take-control" or "desktop-resume")
+        {
+            if (scope?.Agent == "desktop")
+            {
+                scope.Pause(command == "desktop-take-control");
+                SetStatus(scope.Paused ? "Desktop paused · you have control" : "Desktop resumed · observe before input");
+                if (!scope.Paused && pending != null)
+                    await Decide(RequestId(pending), "granted");
+            }
+            return;
+        }
         if (command == "revoke-grants") { RevokeChatGrant(); PostState(); return; }
         if (command == "codex-queue") { SetCodexQueue(value == "on"); return; }
         if (command == "stop") { modelPull?.Cancel(); await EmergencyStop(); return; }
@@ -334,6 +347,11 @@ public partial class MainWindow : Window
                 await SendMessage(prompt);
                 break;
             case "diff": Post("diff", await backend.Diff()); break;
+            case "desktop-scope":
+                if (fullDesktop != (value == "full")) RevokeChatGrant();
+                fullDesktop = value == "full";
+                PostState();
+                break;
             case "mode" when value is "chat" or "plan" or "build" or "blender" or "desktop":
                 if (agent != value) RevokeChatGrant();
                 agent = value;
@@ -388,6 +406,7 @@ public partial class MainWindow : Window
 
     void NewChat()
     {
+        if (CurrentGrant?.Mode == "desktop") RevokeChatGrant();
         session = null;
         File.Delete(SessionFile);
         ResetView();
@@ -397,6 +416,7 @@ public partial class MainWindow : Window
     async Task SelectChat(string id)
     {
         if (!historyIds.Contains(id)) return;
+        if (session != id && CurrentGrant?.Mode == "desktop") RevokeChatGrant();
         session = id;
         File.WriteAllText(SessionFile, id);
         ResetView();
@@ -480,6 +500,15 @@ public partial class MainWindow : Window
         catch (IOException) { run?.Cancel(); }
     }
 
+    static bool RepeatedDesktopFailure(JsonNode? messages, long started) =>
+        Array(messages?["data"])
+            .Where(entry => Number(entry?["time"]?["created"]) >= started)
+            .SelectMany(entry => Array(entry?["content"]))
+            .Where(part => S(part?["type"]) == "tool" && S(part?["name"]).StartsWith("windows_mcp_", StringComparison.Ordinal)
+                && S(part?["state"]?["status"]) is "failed" or "error")
+            .GroupBy(part => (S(part?["name"]), part?["state"]?["input"]?.ToJsonString()))
+            .Any(group => group.Count() >= 2);
+
     async Task PrepareSession(string title, bool useInkling, string tag, CancellationToken cancel)
     {
         if (session == null)
@@ -506,15 +535,15 @@ public partial class MainWindow : Window
             await SendBuiltIn(value, text);
             return;
         }
-        DesktopTarget? target = agent == "desktop" ? selected : null;
-        if (agent == "desktop" && (target == null || !target.IsAlive))
+        DesktopTarget? target = agent == "desktop" && !fullDesktop ? selected : null;
+        if (agent == "desktop" && !fullDesktop && (target == null || !target.IsAlive))
         { SetStatus("Choose an open window for Desktop mode."); return; }
 
         using var current = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         run = current;
         bool useInkling = inkling;
         string tag = SelectedTag;
-        var active = new RunScope(backend.ScopeFile, backend.Project, target, agent);
+        var active = new RunScope(backend.ScopeFile, backend.Project, target, agent, agent == "desktop" && fullDesktop);
         activeRunId = active.Id;
         if (activeCodexTask != null) activeCodexTask.Run = active.Id;
         long started = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -532,7 +561,7 @@ public partial class MainWindow : Window
             OllamaModel? model = useInkling ? null : await backend.DescribeModel(tag, current.Token);
             if (model != null && attachment != null && !model.Vision)
                 throw new InvalidOperationException($"{tag} cannot read images. Detach the image or choose a vision model.");
-            if (model != null && (agent is "blender" or "build" or "desktop" or "plan") && !model.Tools && (agent != "blender" || execution == "native"))
+            if (model != null && (agent is "blender" or "build" or "plan") && !model.Tools && (agent != "blender" || execution == "native"))
                 throw new InvalidOperationException($"{tag} cannot call tools. Choose a model with tool support.");
             if (model != null) await backend.EnsureInferenceModel(model, current.Token);
             await backend.Connect(model);
@@ -547,7 +576,7 @@ public partial class MainWindow : Window
             }
             await backend.PrepareModel(useInkling, current.Token);
             if (agent == "blender") { SetStatus("Connecting to visible Blender…"); await backend.Blender(current.Token); }
-            if (agent is "desktop" or "blender" or "build")
+            if (agent is "blender" or "build" || agent == "desktop" && model == null)
             {
                 string connector = agent == "desktop" ? "windows_mcp" : agent;
                 Journal.Write(active.Id, "connector startup", connector);
@@ -556,9 +585,15 @@ public partial class MainWindow : Window
             current.Token.ThrowIfCancellationRequested();
             scope = active;
             active.Publish();
-            if (agent == "blender" && (execution == "python" || execution == "auto" && model?.Tools == false))
+            if (agent == "desktop" && model != null)
             {
-                await PythonFallback(active, text, model, current.Token);
+                await RunDesktopPlanner(active, text, model, current.Token);
+                return;
+            }
+            if (agent == "blender" && (execution == "python" || execution == "auto" && model != null &&
+                !System.Text.RegularExpressions.Regex.IsMatch(text, @"(?i)\b(simple house|modern house|residential house)\b")))
+            {
+                await PythonFallback(active, text, model, current.Token, structured: execution == "auto");
                 return;
             }
             if (agent == "blender")
@@ -567,6 +602,7 @@ public partial class MainWindow : Window
                 if (attachment != null) text += "\nThe attached image is the modeling reference. Inspect it before choosing geometry.";
             }
             if (target != null) text += "\nSelected window: " + target.Label;
+            if (active.FullDesktop) text += "\nScope: full desktop session. Use Windows to discover apps, Focus to switch, then Snapshot before sending input.";
             var files = new List<object>();
             if (attachment != null)
             {
@@ -592,6 +628,8 @@ public partial class MainWindow : Window
                 finalMessages = messages;
                 await ObserveApproval(Array(approvals?["data"]).FirstOrDefault(), messages);
                 toolFailure = await RefreshMessages(current.Token, started, messages);
+                if (active.Agent == "desktop" && RepeatedDesktopFailure(messages, started))
+                    throw new InvalidOperationException("Desktop stopped after the same action failed twice.");
                 var sessions = (await backend.Call("session/active", cancel: current.Token))?["data"] as JsonObject;
                 bool busy = sessions?.ContainsKey(session!) == true;
                 seenActive |= busy;
@@ -818,7 +856,7 @@ public partial class MainWindow : Window
         var active = scope;
         string family = S(Input(request)?["family"]);
         bool covered = HasGrant(active, request, family);
-        bool automatic = covered && (active.Target == null || active.Target.IsForeground);
+        bool automatic = covered && !active.Paused && (active.Target == null || active.Target.IsForeground);
         PutItem(CallId(request), new(action, automatic ? "Queued" : "Waiting for approval", target, arguments));
         if (automatic)
         {
@@ -860,6 +898,7 @@ public partial class MainWindow : Window
                 throw new InvalidOperationException("OpenCode did not supply the full Python script. Reject this request.");
             if (approve && action is "shell" or "bash" && (Arguments(request).Trim() is "" or "*"))
                 throw new InvalidOperationException("OpenCode did not supply the full shell command. Reject this request.");
+            if (approve && active.Paused) return;
             if (approve && active.Target is { } target)
             {
                 if (!target.IsAlive) { RevokeScope(); throw new InvalidOperationException("The selected window closed. Stop and select another window."); }
