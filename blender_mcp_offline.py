@@ -43,7 +43,7 @@ if "--verify-guard" in sys.argv:
         raise RuntimeError("External destination was not blocked.")
     assert socket.getaddrinfo("127.0.0.1", 19876)
     print("PASS: external DNS and connections denied; loopback allowed")
-elif len(sys.argv) > 1:
+elif len(sys.argv) > 1 and sys.argv[1] != "--fallback":
     from blender_mcp.server import main
     main()
 else:
@@ -67,9 +67,9 @@ else:
 
     uncertain_run = None
 
-    def dispatch(scope, code):
+    def dispatch(scope, code, observation=False):
         global uncertain_run
-        if uncertain_run == scope["Id"]:
+        if not observation and uncertain_run == scope["Id"]:
             raise RuntimeError("The last edit may have run. Inspect the scene or capture a preview before another edit.")
         if active_scope()["Id"] != scope["Id"]:
             raise RuntimeError("Blender run expired before dispatch.")
@@ -226,13 +226,13 @@ except Exception as error:
         code = """import bpy, json
 rows = []
 for ob in list(bpy.context.scene.objects)[:40]:
-    row = {"name": ob.name, "type": ob.type, "size": [round(v, 3) for v in ob.dimensions]}
+    row = {"name": ob.name, "type": ob.type, "location": list(ob.location), "rotation": list(ob.rotation_euler), "size": [round(v, 3) for v in ob.dimensions]}
     if ob.type == "MESH":
         row.update(vertices=len(ob.data.vertices), materials=[m.name for m in ob.data.materials if m][:8])
     rows.append(row)
-print(json.dumps({"scene": bpy.context.scene.name, "count": len(bpy.context.scene.objects), "objects": rows}))
+print(json.dumps({"version": bpy.app.version_string, "scene": bpy.context.scene.name, "count": len(bpy.context.scene.objects), "objects": rows}))
 """
-        result = dispatch(active_scope(), code)
+        result = dispatch(active_scope(), code, observation=True)
         inspect_before_edit = False
         uncertain_run = None
         return result
@@ -289,4 +289,11 @@ print(json.dumps({"scene": bpy.context.scene.name, "count": len(bpy.context.scen
         uncertain_run = None
         return result
 
-    bridge.run()
+    if "--fallback" in sys.argv:
+        from fallback_model import run
+        request = json.loads(Path(sys.argv[-1]).read_text(encoding="utf-8-sig"))
+        if active_scope()["Id"] != request["run"]:
+            raise RuntimeError("Expired Blender run.")
+        run(request, get_scene_info, execute_blender_code, look, save_project)
+    else:
+        bridge.run()

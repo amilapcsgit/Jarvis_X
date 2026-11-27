@@ -113,6 +113,9 @@ function applyState(next) {
   node('attachment').hidden = !next.attachment;
   node('attachment').textContent = next.attachment ? next.attachment + ' ×' : '';
   node('force-blender').hidden = !next.forceBlender;
+  node('execution-label').hidden = next.agent !== 'blender';
+  node('execution').value = next.execution;
+  node('execution').disabled = next.busy;
   node('show-blender').hidden = next.agent !== 'blender' || !next.forceBlender;
   node('console').checked = next.console;
   const disabled = !next.ready || next.busy;
@@ -184,6 +187,11 @@ function updateRow(row) {
     const card = create('article', null, row.author === 'You' ? 'message user' : 'message assistant');
     const body = create('p');
     card.append(create('h3', row.author), body);
+    if (row.source) {
+      const source = create('details', null, 'panel');
+      source.append(create('summary', row.source.split('\n')[0]), create('p', row.source));
+      card.append(source);
+    }
     cardRows.set(row.id, body);
     node('messages').append(card);
     node('welcome').hidden = true;
@@ -331,6 +339,9 @@ function reset() {
 bridge?.addEventListener('message', event => {
   const { type, value } = event.data;
   switch (type) {
+    case 'runtime-settings': renderRuntimeSettings(value); break;
+    case 'runtime-result': node('runtime-result').textContent = value; break;
+    case 'runtime-path': document.getElementById(value.key).value = value.path; break;
     case 'state': applyState(value); break;
     case 'history': history = value; renderHistory(); break;
     case 'windows': windows = value; renderWindows(); break;
@@ -459,3 +470,51 @@ applyMotion();
 send('hello');
 
 node('codex-queue').addEventListener('change', event => send('codex-queue', event.target.checked ? 'on' : 'off'));
+
+function renderRuntimeSettings(settings) {
+  const form = node('runtime-fields');
+  form.replaceChildren();
+  for (const field of settings.fields) {
+    const row = document.createElement('div');
+    const label = document.createElement('label');
+    label.htmlFor = field.key;
+    label.textContent = field.label;
+    const input = document.createElement('input');
+    input.id = field.key;
+    input.value = field.value;
+    row.append(label, input);
+    if (field.key !== 'JARVIS_COMFYUI') {
+      const browse = document.createElement('button');
+      browse.textContent = 'Browse';
+      browse.onclick = () => send('runtime-browse', '', field.key);
+      row.append(browse);
+    }
+    form.append(row);
+  }
+  node('runtime-managed').checked = settings.managed;
+  const dialog = node('runtime-dialog');
+  const actions = node('runtime-actions');
+  actions.replaceChildren();
+  const button = (label, action) => {
+    const control = document.createElement('button');
+    control.textContent = label;
+    control.onclick = action;
+    actions.append(control);
+  };
+  button('Save and apply', () => {
+    const values = Object.fromEntries(settings.fields.map(field => [field.key, node(field.key).value]));
+    values.JARVIS_OLLAMA_MODE = node('runtime-managed').checked ? 'managed' : 'desktop';
+    send('runtime-save', JSON.stringify(values));
+  });
+  for (const [label, action] of [['Open Ollama Desktop','ollama-desktop'], ['Start Ollama','ollama-start'],
+    ['Stop owned Ollama','ollama-stop'], ['Restart owned Ollama','ollama-restart'], ['Runtime logs','logs'],
+    ['Test ComfyUI','comfy-test'], ['Add knowledge files','add-knowledge']]) {
+    button(label, () => send('runtime-' + action, node('JARVIS_COMFYUI').value));
+  }
+  for (const [label, action] of [['Find installed ComfyUI','search'], ['Search Pinokio registry','registry'],
+    ['Install selected recipe','install'], ['Start selected app','launch']]) {
+    button(label, () => send('runtime-pinokio-' + action, node('pinokio-target').value));
+  }
+  button('Close', () => dialog.close());
+  if (!dialog.open) dialog.showModal();
+}

@@ -15,7 +15,7 @@
     <Page Include="MainWindow.xaml"/>
     <EmbeddedResource Include="opencode.json"/>
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3537.50"/>
-    <Content Include="web/**/*;blender_boot.py;blender_mcp_offline.py;blender_house.py;blender_parts.py;desktop_mcp.py;build_mcp.py;jarvis_mcp.py;sdk_probe.py"
+    <Content Include="web/**/*;builtin/**/*;blender_boot.py;blender_mcp_offline.py;blender_house.py;blender_parts.py;fallback_model.py;desktop_mcp.py;build_mcp.py;jarvis_mcp.py;sdk_probe.py"
              CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true"/>
     <Content Include="runtime/blender-scripts/addons/blender_mcp.py"
              Condition="Exists('runtime/blender-scripts/addons/blender_mcp.py')"

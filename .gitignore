@@ -9,3 +9,7 @@ __pycache__/
 *.log
 .env
 pilot*/
+
+builtin/*
+!builtin/JarvisHelp.md
+!builtin/MODELS.md

@@ -31,6 +31,7 @@ sealed partial class Backend
 
     public async Task<JsonNode?> OllamaJson(string endpoint, CancellationToken cancel, object? payload = null)
     {
+        await EnsureOllama(cancel);
         using var response = payload == null
             ? await local.GetAsync(Ollama + endpoint, cancel)
             : await local.PostAsJsonAsync(Ollama + endpoint, payload, cancel);
@@ -92,6 +93,7 @@ sealed partial class Backend
     public async Task PullModel(string tag, Action<string> progress, CancellationToken cancel)
     {
         if (!IsLocalTag(tag)) throw new InvalidOperationException("Enter a public Ollama model tag, such as qwen3.5:4b.");
+        await EnsureOllama(cancel);
         using var request = new HttpRequestMessage(HttpMethod.Post, Ollama + "/api/pull")
         { Content = JsonContent.Create(new { model = tag, stream = true }) };
         using var response = await local.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancel);
@@ -120,6 +122,8 @@ sealed partial class Backend
             output = new[] { "text" }, tools = model.Tools },
         body = model.Thinking ? new { think = false } : null
     }, new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull })!;
+
+    internal Task ReloadRuntimeSettings() => StopOpenCodeForModelChange();
 
     async Task StopOpenCodeForModelChange()
     {

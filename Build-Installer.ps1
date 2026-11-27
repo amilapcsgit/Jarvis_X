@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch] $NoRestore)
+param([switch] $NoRestore, [string] $OutputDirectory = 'publish-installer')
 
 $ErrorActionPreference = 'Stop'
 $restore = @()
@@ -8,7 +8,7 @@ if ($NoRestore) { $restore += '--no-restore' }
 Push-Location -LiteralPath $PSScriptRoot
 try {
     $work = Join-Path $PSScriptRoot 'obj\installer'
-    $publish = Join-Path $PSScriptRoot 'publish-installer'
+    $publish = Join-Path $PSScriptRoot $OutputDirectory
     $app = Join-Path $work ('app-' + [Guid]::NewGuid().ToString('N'))
     $payload = Join-Path $work 'payload.zip'
     New-Item -Path $work -ItemType Directory -Force | Out-Null

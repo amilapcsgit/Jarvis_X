@@ -14,6 +14,8 @@ public partial class App : Application
         instance = new Mutex(true, @"Local\Jarvis.Workspace", out bool first);
         if (!first) { Shutdown(); return; }
         LoadInstalledSettings();
+        RuntimePreferences.Load();
+        DependencyDiscovery.Apply();
         base.OnStartup(e);
         MainWindow = new MainWindow();
         MainWindow.Show();

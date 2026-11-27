@@ -150,3 +150,9 @@ summary { cursor:pointer; }
 .work { z-index:auto; }
 .core-readout { background:#041626bb; border:1px solid #66dce66b; border-radius:8px; padding:6px 14px; }
 .core-readout strong { font-size:clamp(15px,2vw,24px); }
+#runtime-dialog { width: min(760px, 88vw); max-height: 85vh; overflow: auto; padding: 24px; background: #091726; color: #e7f2fd; }
+#runtime-dialog::backdrop { background: #020711b8; }
+#runtime-fields > div { display: grid; grid-template-columns: 180px 1fr auto; gap: 8px; align-items: center; margin-bottom: 8px; }
+#runtime-fields input { min-width: 0; width: 100%; }
+#runtime-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+#runtime-result { white-space: pre-wrap; overflow-wrap: anywhere; }

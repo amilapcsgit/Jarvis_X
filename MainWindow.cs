@@ -107,12 +107,7 @@ public partial class MainWindow : Window
             await webStartup;
             if (hardStopped) return;
             _ = CollectMetrics();
-            SetStatus("Connecting to local OpenCode…");
-            await backend.Connect();
-            if (hardStopped) return;
             session = File.Exists(SessionFile) ? File.ReadAllText(SessionFile).Trim() : null;
-            await LoadHistory();
-            if (session != null) await RefreshMessages();
             ready = true;
             SetStatus("Workspace ready");
             if (File.Exists(ModelFile))
@@ -120,7 +115,7 @@ public partial class MainWindow : Window
                 string savedModel = File.ReadAllText(ModelFile).Trim();
                 if (Backend.IsLocalTag(savedModel)) preferredTag = savedModel;
             }
-            await ModelCommand("models-refresh", "");
+            PostState();
         }
         catch (Exception ex)
         {
@@ -188,6 +183,7 @@ public partial class MainWindow : Window
     void RevokeChatGrant()
     {
         if (session != null) grants.Remove(session);
+        if (fallbackActive) { scope?.Revoke(); run?.Cancel(); }
     }
 
     static readonly HashSet<string> BlenderActions = new(StringComparer.Ordinal)
@@ -259,7 +255,7 @@ public partial class MainWindow : Window
     {
         ready, status, agent, inkling, blenderGrant = BlenderGrant, desktopGrant = DesktopGrant, buildGrant = BuildGrant, acceptCodex, canContinueBlender = lastBuildPrompt != null, busy = run != null || stopping || refreshingModels, deciding,
         project = backend.Project, session, attachment = attachment == null ? null : Path.GetFileName(attachment),
-        target = selected?.Id, forceBlender = backend.OwnsBlender, console = diagnosticWindow != null
+        execution, target = selected?.Id, forceBlender = backend.OwnsBlender, console = diagnosticWindow != null
     });
 
     async Task AdmittedCommand(JsonNode? request)
@@ -267,11 +263,22 @@ public partial class MainWindow : Window
         if (request is not JsonObject) return;
         string command = S(request["command"]), value = S(request["value"]);
         if (hardStopped) return;
+        if (command.StartsWith("runtime-", StringComparison.Ordinal))
+        {
+            await RuntimeCommand(command, value, S(request["id"]));
+            return;
+        }
+        if (command == "ollama-desktop")
+        {
+            try { backend.OpenOllamaDesktop(); }
+            catch (Exception error) { SetStatus(error.Message); }
+            return;
+        }
         if (command == "hello")
         {
             PostState();
             Post("visibility", new { minimized = WindowState == WindowState.Minimized });
-            if (ready) { await LoadHistory(); ResetView(); await RefreshMessages(); }
+            if (ready && agent != "chat") { await backend.Connect(); await LoadHistory(); ResetView(); await RefreshMessages(); }
             return;
         }
         if (command is "model" or "models-refresh" or "model-pull" or "model-cancel")
@@ -311,6 +318,7 @@ public partial class MainWindow : Window
         if (run != null || stopping || !ready) return;
         switch (command)
         {
+            case "execution" when value is "auto" or "native" or "python": execution = value; PostState(); break;
             case "folder": await ChooseProject(); break;
             case "new": NewChat(); break;
             case "history": await SelectChat(value); break;
@@ -493,6 +501,11 @@ public partial class MainWindow : Window
         if (hardStopped || stopping || closing || run != null || refreshingModels) return;
         string text = value.Trim();
         if (text.Length == 0 || text.Length > 100_000) return;
+        if (agent == "chat")
+        {
+            await SendBuiltIn(value, text);
+            return;
+        }
         DesktopTarget? target = agent == "desktop" ? selected : null;
         if (agent == "desktop" && (target == null || !target.IsAlive))
         { SetStatus("Choose an open window for Desktop mode."); return; }
@@ -505,6 +518,7 @@ public partial class MainWindow : Window
         activeRunId = active.Id;
         if (activeCodexTask != null) activeCodexTask.Run = active.Id;
         long started = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var inputReference = attachment;
         string? toolFailure = null;
         currentRunOutput = null;
         lastRunOk = false;
@@ -518,7 +532,7 @@ public partial class MainWindow : Window
             OllamaModel? model = useInkling ? null : await backend.DescribeModel(tag, current.Token);
             if (model != null && attachment != null && !model.Vision)
                 throw new InvalidOperationException($"{tag} cannot read images. Detach the image or choose a vision model.");
-            if (model != null && (agent is "blender" or "build" or "desktop" or "plan") && !model.Tools)
+            if (model != null && (agent is "blender" or "build" or "desktop" or "plan") && !model.Tools && (agent != "blender" || execution == "native"))
                 throw new InvalidOperationException($"{tag} cannot call tools. Choose a model with tool support.");
             if (model != null) await backend.EnsureInferenceModel(model, current.Token);
             await backend.Connect(model);
@@ -542,6 +556,11 @@ public partial class MainWindow : Window
             current.Token.ThrowIfCancellationRequested();
             scope = active;
             active.Publish();
+            if (agent == "blender" && (execution == "python" || execution == "auto" && model?.Tools == false))
+            {
+                await PythonFallback(active, text, model, current.Token);
+                return;
+            }
             if (agent == "blender")
             {
                 text += "\nSelected project folder: " + active.Project;
@@ -564,11 +583,13 @@ public partial class MainWindow : Window
             SetStatus("Running locally · " + modelName);
             await LoadHistory();
             bool seenActive = false;
+            JsonNode? finalMessages = null;
             for (int i = 0; ; i++)
             {
                 current.Token.ThrowIfCancellationRequested();
                 var approvals = await backend.Call(Route + "/permission", cancel: current.Token);
                 var messages = await backend.Call(Route + "/message", cancel: current.Token);
+                finalMessages = messages;
                 await ObserveApproval(Array(approvals?["data"]).FirstOrDefault(), messages);
                 toolFailure = await RefreshMessages(current.Token, started, messages);
                 var sessions = (await backend.Call("session/active", cancel: current.Token))?["data"] as JsonObject;
@@ -576,6 +597,22 @@ public partial class MainWindow : Window
                 seenActive |= busy;
                 if (!busy && pending == null && (seenActive || i >= 10)) break;
                 await Task.Delay(360, current.Token);
+            }
+            if (agent == "blender" && execution == "auto")
+            {
+                var parts = Array(finalMessages?["data"]).Where(entry => S(entry?["type"]) == "assistant"
+                    && Number(entry?["time"]?["created"]) >= started).SelectMany(entry => Array(entry?["content"])).ToList();
+                bool edited = parts.Any(part => S(part?["name"]) is "blender_execute_blender_code" or "blender_put_parts" or "blender_save_project" or "blender_build_house");
+                var reply = string.Join("\n", parts.Where(part => S(part?["type"]) == "text").Select(part => S(part?["text"]))).Trim();
+                bool proposed = reply.Contains("```python", StringComparison.OrdinalIgnoreCase) || reply.Contains("import bpy");
+                bool unsupported = toolFailure?.Contains("tool", StringComparison.OrdinalIgnoreCase) == true &&
+                    toolFailure.Contains("support", StringComparison.OrdinalIgnoreCase);
+                if (!edited && (unsupported || proposed && !reply.EndsWith('?')))
+                {
+                    attachment = inputReference;
+                    await PythonFallback(active, value, model, current.Token);
+                    return;
+                }
             }
             currentRunOutput = VerifiedOutput(active);
             lastRunOk = toolFailure == null || currentRunOutput != null;

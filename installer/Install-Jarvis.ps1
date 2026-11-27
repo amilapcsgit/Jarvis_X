@@ -131,6 +131,21 @@ try {
     New-Item -Path $defaultInstall -ItemType Directory -Force | Out-Null
     $installDir = Select-Folder 'Choose the folder where Jarvis_X will be installed.' $defaultInstall
     if (!$installDir) { exit 0 }
+    if (!(Confirm-Setup 'Set up Ollama and Blender now? Select No to install Jarvis Built-in and configure these tools later.')) {
+        $exe = Join-Path $installDir 'Jarvis.exe'
+        if (Get-Process -Name Jarvis -ErrorAction SilentlyContinue | Where-Object Path -EQ $exe) {
+            throw 'Close this installed copy of Jarvis_X and run setup again.'
+        }
+        $extracted = Join-Path (Split-Path $Payload) 'app'
+        [IO.Compression.ZipFile]::ExtractToDirectory($Payload, $extracted)
+        New-Item -Path $installDir -ItemType Directory -Force | Out-Null
+        Get-ChildItem -LiteralPath $extracted | Copy-Item -Destination $installDir -Recurse -Force
+        New-Shortcut ([Environment]::GetFolderPath('Programs')) $exe
+        if (Confirm-Setup 'Create a desktop shortcut?') { New-Shortcut ([Environment]::GetFolderPath('DesktopDirectory')) $exe }
+        Start-Process -FilePath $exe -WorkingDirectory $installDir
+        exit 0
+    }
+
     $modelDir = $null
     if (Confirm-Setup 'Choose a different folder for shared Ollama models? Select No to keep the current folder.') {
         $modelDir = Select-Folder 'Choose the shared Ollama model folder.' $env:USERPROFILE
